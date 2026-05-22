@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 
-// IP del servidor Python (Asegúrate de que sea la IP de tu Jetson)
 const JETSON_IP = "127.0.0.1";
 
 interface TelemetryData {
@@ -12,6 +11,34 @@ interface TelemetryData {
   distancia_derecha: number;
 }
 
+interface ArmTelemetry {
+  arm: {
+    shoulder_pan?: number;
+    shoulder_lift?: number;
+    elbow_flex?: number;
+    wrist_flex?: number;
+    wrist_roll?: number;
+    gripper?: number;
+  };
+  odom: {
+    x: number;
+    y: number;
+    theta: number;
+  };
+  mode: string;
+}
+
+const JOINT_LABELS: Record<string, string> = {
+  shoulder_pan:   'SHLDR PAN',
+  shoulder_lift:  'SHLDR LIFT',
+  elbow_flex:     'ELBOW FLEX',
+  wrist_flex:     'WRIST FLEX',
+  wrist_roll:     'WRIST ROLL',
+  gripper:        'GRIPPER',
+};
+
+const JOINT_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper'];
+
 function App() {
   const [telemetry, setTelemetry] = useState<TelemetryData>({
     pitch: 0,
@@ -19,18 +46,24 @@ function App() {
     yaw: 0,
     distancia_frontal: 5.0,
     distancia_izquierda: 5.0,
-    distancia_derecha: 5.0
+    distancia_derecha: 5.0,
   });
-  
+
+  const [armTelemetry, setArmTelemetry] = useState<ArmTelemetry>({
+    arm: {},
+    odom: { x: 0, y: 0, theta: 0 },
+    mode: 'RC',
+  });
+
   const [isConnected, setIsConnected] = useState(false);
+  const [isArmConnected, setIsArmConnected] = useState(false);
   const [roverMode, setRoverMode] = useState<'MANUAL' | 'AUTO' | 'AI'>('AUTO');
   const [isEStopActive, setIsEStopActive] = useState(false);
 
+  // Rover telemetry SSE
   useEffect(() => {
     const eventSource = new EventSource(`http://${JETSON_IP}:8000/telemetry`);
-
     eventSource.onopen = () => setIsConnected(true);
-
     eventSource.onmessage = (event) => {
       try {
         const data: TelemetryData = JSON.parse(event.data);
@@ -39,25 +72,41 @@ function App() {
         console.error("Error leyendo telemetría:", err);
       }
     };
-
     eventSource.onerror = () => {
       setIsConnected(false);
       eventSource.close();
     };
-
     return () => eventSource.close();
   }, []);
 
-  const handleEStop = () => {
-    setIsEStopActive(!isEStopActive);
-  };
+  // Arm telemetry SSE
+  useEffect(() => {
+    const armSource = new EventSource(`http://${JETSON_IP}:8000/arm_telemetry`);
+    armSource.onopen = () => setIsArmConnected(true);
+    armSource.onmessage = (event) => {
+      try {
+        const data: ArmTelemetry = JSON.parse(event.data);
+        setArmTelemetry(data);
+      } catch (err) {
+        console.error("Error leyendo telemetría del brazo:", err);
+      }
+    };
+    armSource.onerror = () => {
+      setIsArmConnected(false);
+      armSource.close();
+    };
+    return () => armSource.close();
+  }, []);
+
+  const handleEStop = () => setIsEStopActive(!isEStopActive);
 
   const distFrontal = telemetry?.distancia_frontal ?? 5.0;
   const distancePercentage = Math.min((distFrontal / 5.0) * 100, 100);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-300 font-mono p-4 selection:bg-green-900 selection:text-green-400">
-      
+
+      {/* HEADER */}
       <header className="flex justify-between items-end border-b border-slate-800 pb-4 mb-4">
         <div>
           <h1 className="text-2xl font-black tracking-tighter text-white">
@@ -67,10 +116,9 @@ function App() {
             IAA 2026 • Enlace Local
           </p>
         </div>
-        
         <div className="flex items-center gap-6">
           <div className="flex flex-col items-end">
-            <span className="text-[10px] text-slate-500 uppercase tracking-widest">Estado del Sistema</span>
+            <span className="text-[10px] text-slate-500 uppercase tracking-widest">Rover</span>
             <div className="flex items-center gap-2 mt-1">
               <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></span>
               <span className={`text-xs font-bold tracking-widest ${isConnected ? 'text-green-500' : 'text-red-500'}`}>
@@ -78,35 +126,48 @@ function App() {
               </span>
             </div>
           </div>
+          <div className="flex flex-col items-end">
+            <span className="text-[10px] text-slate-500 uppercase tracking-widest">Brazo SO101</span>
+            <div className="flex items-center gap-2 mt-1">
+              <span className={`w-2 h-2 rounded-full ${isArmConnected ? 'bg-blue-500 animate-pulse' : 'bg-red-500'}`}></span>
+              <span className={`text-xs font-bold tracking-widest ${isArmConnected ? 'text-blue-400' : 'text-red-500'}`}>
+                {isArmConnected ? 'EN LÍNEA' : 'SIN SEÑAL'}
+              </span>
+            </div>
+          </div>
         </div>
       </header>
 
-      <main className="grid grid-cols-12 gap-4 h-[85vh]">
-        
+      {/* MAIN GRID: Video + Sidebar */}
+      <main className="grid grid-cols-12 gap-4 h-[55vh] mb-4">
+
+        {/* VIDEO PRINCIPAL */}
         <section className="col-span-8 bg-black rounded-lg border border-slate-800 overflow-hidden relative flex flex-col">
           <div className="absolute top-4 left-4 z-10 bg-black/60 px-2 py-1 rounded text-[10px] text-green-500 border border-green-900 uppercase tracking-widest backdrop-blur-sm">
             Cam-01 / Feed Principal
           </div>
-          <img 
-            src={`http://${JETSON_IP}:8000/video_feed`} 
+          <img
+            src={`http://${JETSON_IP}:8000/video_feed`}
             alt="Rover Main Camera"
             className={`w-full h-full object-cover ${isEStopActive ? 'grayscale' : ''}`}
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
           />
         </section>
 
+        {/* SIDEBAR */}
         <aside className="col-span-4 flex flex-col gap-4">
-          
+
+          {/* Control de Operaciones */}
           <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg">
             <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Control de Operaciones</h3>
             <div className="grid grid-cols-3 gap-2 mb-4">
               {['MANUAL', 'AUTO', 'AI'].map((mode) => (
-                <button 
+                <button
                   key={mode}
                   onClick={() => setRoverMode(mode as any)}
                   className={`py-2 text-[10px] font-bold rounded uppercase tracking-wider transition-colors ${
-                    roverMode === mode 
-                      ? 'bg-green-900/50 text-green-400 border border-green-700' 
+                    roverMode === mode
+                      ? 'bg-green-900/50 text-green-400 border border-green-700'
                       : 'bg-slate-950 text-slate-500 border border-slate-800 hover:bg-slate-800'
                   }`}
                 >
@@ -114,7 +175,7 @@ function App() {
                 </button>
               ))}
             </div>
-            <button 
+            <button
               onClick={handleEStop}
               className={`w-full py-3 rounded text-sm font-black uppercase tracking-widest transition-all ${
                 isEStopActive ? 'bg-red-600 text-white animate-pulse' : 'bg-red-950/50 text-red-500 border border-red-900'
@@ -124,6 +185,7 @@ function App() {
             </button>
           </div>
 
+          {/* IMU */}
           <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg">
             <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Unidad Inercial (IMU)</h3>
             <div className="grid grid-cols-3 gap-2 text-center">
@@ -142,6 +204,7 @@ function App() {
             </div>
           </div>
 
+          {/* Radar Perimetral */}
           <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg">
             <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Radar Perimetral</h3>
             <div className="grid grid-cols-3 gap-2 text-center mb-4">
@@ -159,22 +222,98 @@ function App() {
               </div>
             </div>
             <div className="w-full bg-slate-950 h-3 rounded-full overflow-hidden border border-slate-800">
-              <div 
+              <div
                 className={`h-full transition-all duration-300 ${distFrontal < 1.0 ? 'bg-red-500' : distFrontal < 2.5 ? 'bg-yellow-400' : 'bg-green-500'}`}
                 style={{ width: `${distancePercentage}%` }}
               ></div>
             </div>
           </div>
 
+          {/* Terminal */}
           <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex-1 overflow-hidden flex flex-col">
             <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Terminal de Sistema</h3>
             <div className="text-[10px] leading-tight font-mono space-y-2 flex-1 overflow-y-auto">
               <p className="text-slate-500">[{new Date().toLocaleTimeString()}] Sistema de navegación operativo.</p>
-              {isConnected && <p className="text-blue-400">[{new Date().toLocaleTimeString()}] Enlace WebSocket 8000 activo.</p>}
+              {isConnected && <p className="text-green-400">[{new Date().toLocaleTimeString()}] Rover SSE :8000 activo.</p>}
+              {isArmConnected && <p className="text-blue-400">[{new Date().toLocaleTimeString()}] Brazo SO101 conectado. Modo: {armTelemetry.mode}</p>}
             </div>
           </div>
         </aside>
       </main>
+
+      {/* ARM SECTION */}
+      <section className="grid grid-cols-12 gap-4 h-[22vh]">
+
+        {/* Cámara del brazo */}
+        <div className="col-span-4 bg-black rounded-lg border border-slate-800 overflow-hidden relative">
+          <div className="absolute top-2 left-2 z-10 bg-black/60 px-2 py-1 rounded text-[10px] text-blue-400 border border-blue-900 uppercase tracking-widest backdrop-blur-sm">
+            Cam-02 / Brazo USB
+          </div>
+          <img
+            src={`http://${JETSON_IP}:8000/camera_usb`}
+            alt="Arm Camera"
+            className="w-full h-full object-cover"
+            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+          />
+        </div>
+
+        {/* Joints SO101 */}
+        <div className="col-span-5 bg-slate-900 border border-slate-800 p-4 rounded-lg">
+          <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Brazo SO101 — Joints</h3>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+            {JOINT_NAMES.map((joint) => {
+              const val = (armTelemetry.arm as any)[joint] ?? 0;
+              const pct = Math.min(Math.abs(val) / Math.PI * 100, 100);
+              return (
+                <div key={joint}>
+                  <div className="flex justify-between text-[9px] mb-1">
+                    <span className="text-slate-500 uppercase">{JOINT_LABELS[joint]}</span>
+                    <span className="text-blue-300 font-bold">{val.toFixed(2)} rad</span>
+                  </div>
+                  <div className="w-full bg-slate-950 h-1.5 rounded-full overflow-hidden border border-slate-800">
+                    <div
+                      className="h-full bg-blue-500 transition-all duration-200"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Odometría + Modo base */}
+        <div className="col-span-3 bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col gap-3">
+          <div>
+            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Odometría</h3>
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div className="bg-slate-950 border border-slate-800 p-2 rounded">
+                <div className="text-[9px] text-slate-500 mb-1">X</div>
+                <div className="font-bold text-slate-200 text-xs">{(armTelemetry.odom?.x ?? 0).toFixed(2)}m</div>
+              </div>
+              <div className="bg-slate-950 border border-slate-800 p-2 rounded">
+                <div className="text-[9px] text-slate-500 mb-1">Y</div>
+                <div className="font-bold text-slate-200 text-xs">{(armTelemetry.odom?.y ?? 0).toFixed(2)}m</div>
+              </div>
+              <div className="bg-slate-950 border border-slate-800 p-2 rounded">
+                <div className="text-[9px] text-slate-500 mb-1">θ</div>
+                <div className="font-bold text-slate-200 text-xs">{(armTelemetry.odom?.theta ?? 0).toFixed(2)}°</div>
+              </div>
+            </div>
+          </div>
+          <div>
+            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Modo Base</h3>
+            <div className={`text-center py-2 rounded border font-bold text-sm tracking-widest ${
+              armTelemetry.mode === 'RC'
+                ? 'bg-yellow-900/30 text-yellow-400 border-yellow-800'
+                : 'bg-blue-900/30 text-blue-400 border-blue-800'
+            }`}>
+              {armTelemetry.mode || 'RC'}
+            </div>
+          </div>
+        </div>
+
+      </section>
     </div>
   );
 }
