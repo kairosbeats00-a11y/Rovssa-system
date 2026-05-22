@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 // IP del servidor Python (Asegúrate de que sea la IP de tu Jetson)
 const JETSON_IP = "127.0.0.1";
