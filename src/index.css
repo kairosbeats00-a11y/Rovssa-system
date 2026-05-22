@@ -1,0 +1,38 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Reset para que el Dashboard ocupe toda la pantalla */
+:root {
+  font-family: ui-monospace, Consolas, monospace; /* Fuente tipo código por defecto */
+  background-color: #020617; /* Slate-950 de Tailwind */
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  place-items: baseline;
+  min-width: 320px;
+  min-height: 100vh;
+  background-color: #020617;
+}
+
+#root {
+  width: 100%;      /* IMPORTANTE: Quitamos los 1126px para que sea full-width */
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+}
+
+/* Scrollbar estilo hacker/minimalista */
+::-webkit-scrollbar {
+  width: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #020617;
+}
+::-webkit-scrollbar-thumb {
+  background: #064e3b; /* Verde oscuro */
+  border-radius: 10px;
+}
