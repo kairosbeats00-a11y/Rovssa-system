@@ -1,7 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 
-const JETSON_IP = "127.0.0.1";
+// ── IP de la Jetson ────────────────────────────────────────────────────────
+// Prioridad: var de entorno (build) → localStorage → fallback
+const DEFAULT_IP = (import.meta as any).env?.VITE_JETSON_IP || '192.168.1.100';
 
+function getJetsonIP(): string {
+  return localStorage.getItem('rovssa_jetson_ip') || DEFAULT_IP;
+}
+
+// ── Tipos ──────────────────────────────────────────────────────────────────
 interface TelemetryData {
   pitch: number;
   roll: number;
@@ -11,270 +18,464 @@ interface TelemetryData {
   distancia_derecha: number;
 }
 
-interface ArmTelemetry {
+interface PicoTelemetry {
   arm: {
-    shoulder_pan?: number;
-    shoulder_lift?: number;
-    elbow_flex?: number;
-    wrist_flex?: number;
-    wrist_roll?: number;
-    gripper?: number;
+    enc_FL?: number;
+    enc_FR?: number;
+    enc_RL?: number;
+    enc_RR?: number;
+    pico_connected?: boolean;
   };
-  odom: {
-    x: number;
-    y: number;
-    theta: number;
-  };
+  odom: { x: number; y: number; theta: number };
   mode: string;
+  ch?: number[];
 }
 
-const JOINT_LABELS: Record<string, string> = {
-  shoulder_pan:   'SHLDR PAN',
-  shoulder_lift:  'SHLDR LIFT',
-  elbow_flex:     'ELBOW FLEX',
-  wrist_flex:     'WRIST FLEX',
-  wrist_roll:     'WRIST ROLL',
-  gripper:        'GRIPPER',
-};
+type RoverMode = 'MANUAL' | 'AUTO' | 'AI';
 
-const JOINT_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper'];
+// ── Constantes de control ──────────────────────────────────────────────────
+const DRIVE_VX    = 0.7;   // velocidad lineal (0-1)
+const DRIVE_OMEGA = 0.6;   // velocidad angular (0-1)
 
 function App() {
+  const [jetsonIP, setJetsonIP] = useState<string>(getJetsonIP());
+  const [showSettings, setShowSettings] = useState(false);
+  const [ipInput, setIpInput] = useState<string>(getJetsonIP());
+
   const [telemetry, setTelemetry] = useState<TelemetryData>({
-    pitch: 0,
-    roll: 0,
-    yaw: 0,
+    pitch: 0, roll: 0, yaw: 0,
     distancia_frontal: 5.0,
     distancia_izquierda: 5.0,
     distancia_derecha: 5.0,
   });
 
-  const [armTelemetry, setArmTelemetry] = useState<ArmTelemetry>({
+  const [picoTelemetry, setPicoTelemetry] = useState<PicoTelemetry>({
     arm: {},
     odom: { x: 0, y: 0, theta: 0 },
-    mode: 'RC',
+    mode: 'GCS',
+    ch: [1500, 1500, 1500, 1500, 1500, 1500],
   });
 
-  const [isConnected, setIsConnected] = useState(false);
-  const [isArmConnected, setIsArmConnected] = useState(false);
-  const [roverMode, setRoverMode] = useState<'MANUAL' | 'AUTO' | 'AI'>('AUTO');
+  const [isConnected, setIsConnected]     = useState(false);
+  const [isPicoConnected, setIsPicoConnected] = useState(false);
+  const [roverMode, setRoverMode]         = useState<RoverMode>('MANUAL');
   const [isEStopActive, setIsEStopActive] = useState(false);
 
-  // Rover telemetry SSE
-  useEffect(() => {
-    const eventSource = new EventSource(`http://${JETSON_IP}:8000/telemetry`);
-    eventSource.onopen = () => setIsConnected(true);
-    eventSource.onmessage = (event) => {
-      try {
-        const data: TelemetryData = JSON.parse(event.data);
-        setTelemetry(data);
-      } catch (err) {
-        console.error("Error leyendo telemetría:", err);
-      }
-    };
-    eventSource.onerror = () => {
-      setIsConnected(false);
-      eventSource.close();
-    };
-    return () => eventSource.close();
+  // Keys actualmente presionadas para control de teclado
+  const keysRef = useRef<Set<string>>(new Set());
+  const driveLoopRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [activeKeys, setActiveKeys] = useState<Set<string>>(new Set());
+
+  // Log del terminal
+  const [logs, setLogs] = useState<string[]>([
+    `[BOOT] ROVSSA Control System iniciado`,
+    `[CFG]  Jetson IP: ${getJetsonIP()}`,
+  ]);
+  const addLog = useCallback((msg: string) => {
+    const ts = new Date().toLocaleTimeString();
+    setLogs(prev => [`[${ts}] ${msg}`, ...prev].slice(0, 30));
   }, []);
 
-  // Arm telemetry SSE
+  // ── SSE telemetría rover ─────────────────────────────────────────────────
   useEffect(() => {
-    const armSource = new EventSource(`http://${JETSON_IP}:8000/arm_telemetry`);
-    armSource.onopen = () => setIsArmConnected(true);
-    armSource.onmessage = (event) => {
-      try {
-        const data: ArmTelemetry = JSON.parse(event.data);
-        setArmTelemetry(data);
-      } catch (err) {
-        console.error("Error leyendo telemetría del brazo:", err);
-      }
+    let es: EventSource;
+    let retryTimer: ReturnType<typeof setTimeout>;
+
+    const connect = () => {
+      es = new EventSource(`http://${jetsonIP}:8000/telemetry`);
+      es.onopen = () => {
+        setIsConnected(true);
+        addLog('Rover SSE :8000 conectado');
+      };
+      es.onmessage = (event) => {
+        try { setTelemetry(JSON.parse(event.data)); } catch {}
+      };
+      es.onerror = () => {
+        setIsConnected(false);
+        es.close();
+        retryTimer = setTimeout(connect, 3000);
+      };
     };
-    armSource.onerror = () => {
-      setIsArmConnected(false);
-      armSource.close();
+
+    connect();
+    return () => { es?.close(); clearTimeout(retryTimer); };
+  }, [jetsonIP, addLog]);
+
+  // ── SSE telemetría Pico ──────────────────────────────────────────────────
+  useEffect(() => {
+    let es: EventSource;
+    let retryTimer: ReturnType<typeof setTimeout>;
+
+    const connect = () => {
+      es = new EventSource(`http://${jetsonIP}:8000/arm_telemetry`);
+      es.onopen = () => setIsPicoConnected(true);
+      es.onmessage = (event) => {
+        try {
+          const data: PicoTelemetry = JSON.parse(event.data);
+          setPicoTelemetry(data);
+          setIsPicoConnected(!!data.arm?.pico_connected);
+        } catch {}
+      };
+      es.onerror = () => {
+        setIsPicoConnected(false);
+        es.close();
+        retryTimer = setTimeout(connect, 3000);
+      };
     };
-    return () => armSource.close();
+
+    connect();
+    return () => { es?.close(); clearTimeout(retryTimer); };
+  }, [jetsonIP]);
+
+  // ── Enviar comando HTTP al servidor ─────────────────────────────────────
+  const sendCommand = useCallback(async (cmd: object) => {
+    try {
+      await fetch(`http://${jetsonIP}:8000/command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cmd),
+      });
+    } catch { /* silencio si Jetson no responde */ }
+  }, [jetsonIP]);
+
+  // ── E-Stop ───────────────────────────────────────────────────────────────
+  const handleEStop = useCallback(() => {
+    const next = !isEStopActive;
+    setIsEStopActive(next);
+    sendCommand({ cmd: next ? 'estop' : 'estop_release' });
+    addLog(next ? '🛑 E-STOP ACTIVADO' : '✅ E-STOP liberado');
+  }, [isEStopActive, sendCommand, addLog]);
+
+  // ── Cambio de modo ───────────────────────────────────────────────────────
+  const handleModeChange = useCallback((mode: RoverMode) => {
+    setRoverMode(mode);
+    sendCommand({ cmd: 'set_mode', mode });
+    addLog(`Modo → ${mode}`);
+  }, [sendCommand, addLog]);
+
+  // ── Control por teclado ──────────────────────────────────────────────────
+  // WASD / flechas: drive; Espacio: stop; R: reset odom
+  const computeDriveFromKeys = useCallback(() => {
+    const keys = keysRef.current;
+    let vx = 0, omega = 0;
+    if (keys.has('w') || keys.has('ArrowUp'))    vx    += DRIVE_VX;
+    if (keys.has('s') || keys.has('ArrowDown'))  vx    -= DRIVE_VX;
+    if (keys.has('a') || keys.has('ArrowLeft'))  omega -= DRIVE_OMEGA;
+    if (keys.has('d') || keys.has('ArrowRight')) omega += DRIVE_OMEGA;
+    return { vx, omega };
   }, []);
 
-  const handleEStop = () => setIsEStopActive(!isEStopActive);
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // No interceptar cuando el usuario escribe en un input
+      if (e.target instanceof HTMLInputElement) return;
 
+      const key = e.key;
+      if (['w','a','s','d','ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(key)) {
+        e.preventDefault();
+      }
+
+      if (key === ' ') {
+        sendCommand({ cmd: 'stop' });
+        return;
+      }
+      if (key === 'r' || key === 'R') {
+        sendCommand({ cmd: 'reset_odom' });
+        addLog('Odometría reseteada');
+        return;
+      }
+      if (key === 'e' || key === 'E') {
+        handleEStop();
+        return;
+      }
+
+      if (!keysRef.current.has(key)) {
+        keysRef.current.add(key);
+        setActiveKeys(new Set(keysRef.current));
+      }
+    };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      keysRef.current.delete(e.key);
+      setActiveKeys(new Set(keysRef.current));
+      // Si no queda ninguna tecla de movimiento, detener
+      const movKeys = ['w','a','s','d','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
+      if (!movKeys.some(k => keysRef.current.has(k))) {
+        if (roverMode === 'MANUAL' && !isEStopActive) {
+          sendCommand({ cmd: 'stop' });
+        }
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup',   onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup',   onKeyUp);
+    };
+  }, [roverMode, isEStopActive, sendCommand, handleEStop, addLog]);
+
+  // Loop de drive a 10 Hz mientras hay teclas presionadas
+  useEffect(() => {
+    if (driveLoopRef.current) clearInterval(driveLoopRef.current);
+    driveLoopRef.current = setInterval(() => {
+      if (roverMode !== 'MANUAL' || isEStopActive) return;
+      const { vx, omega } = computeDriveFromKeys();
+      if (vx !== 0 || omega !== 0) {
+        sendCommand({ cmd: 'drive', vx, omega });
+      }
+    }, 100);
+    return () => { if (driveLoopRef.current) clearInterval(driveLoopRef.current); };
+  }, [roverMode, isEStopActive, sendCommand, computeDriveFromKeys]);
+
+  // ── Guardar IP ──────────────────────────────────────────────────────────
+  const saveIP = () => {
+    localStorage.setItem('rovssa_jetson_ip', ipInput);
+    setJetsonIP(ipInput);
+    setShowSettings(false);
+    addLog(`IP cambiada → ${ipInput}`);
+  };
+
+  // ── Helpers visuales ────────────────────────────────────────────────────
   const distFrontal = telemetry?.distancia_frontal ?? 5.0;
-  const distancePercentage = Math.min((distFrontal / 5.0) * 100, 100);
+  const distPct = Math.min((distFrontal / 5.0) * 100, 100);
+  const distColor = distFrontal < 0.5 ? 'bg-red-500' : distFrontal < 1.5 ? 'bg-yellow-400' : 'bg-green-500';
+
+  const encFL = picoTelemetry.arm?.enc_FL ?? 0;
+  const encFR = picoTelemetry.arm?.enc_FR ?? 0;
+  const encRL = picoTelemetry.arm?.enc_RL ?? 0;
+  const encRR = picoTelemetry.arm?.enc_RR ?? 0;
+
+  const isKeyActive = (keys: string[]) => keys.some(k => activeKeys.has(k));
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-300 font-mono p-4 selection:bg-green-900 selection:text-green-400">
 
-      {/* HEADER */}
+      {/* ── MODAL SETTINGS ──────────────────────────────────────────── */}
+      {showSettings && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center">
+          <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 w-80 shadow-2xl">
+            <h2 className="text-sm font-bold text-white uppercase tracking-widest mb-4">
+              ⚙ Configuración
+            </h2>
+            <label className="text-[10px] text-slate-400 uppercase tracking-widest block mb-1">
+              IP de la Jetson Nano
+            </label>
+            <input
+              type="text"
+              value={ipInput}
+              onChange={e => setIpInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && saveIP()}
+              placeholder="192.168.1.100"
+              className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-green-600 mb-4"
+            />
+            <div className="flex gap-2">
+              <button onClick={saveIP}
+                className="flex-1 bg-green-700 hover:bg-green-600 text-white text-xs font-bold py-2 rounded uppercase tracking-wider">
+                Guardar
+              </button>
+              <button onClick={() => setShowSettings(false)}
+                className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold py-2 rounded uppercase tracking-wider">
+                Cancelar
+              </button>
+            </div>
+            <p className="text-[9px] text-slate-600 mt-3 text-center">
+              También: VITE_JETSON_IP env var en el build
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── HEADER ──────────────────────────────────────────────────── */}
       <header className="flex justify-between items-end border-b border-slate-800 pb-4 mb-4">
         <div>
           <h1 className="text-2xl font-black tracking-tighter text-white">
-            ROVSA <span className="text-green-500">//</span> MISSION CONTROL
+            ROVSSA <span className="text-green-500">//</span> MISSION CONTROL
           </h1>
           <p className="text-[10px] text-slate-500 font-bold uppercase tracking-[0.2em] mt-1">
-            IAA 2026 • Enlace Local
+            IAA 2026 · Jetson Nano · {jetsonIP}
           </p>
         </div>
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-5">
+          {/* Estado Jetson SSE */}
           <div className="flex flex-col items-end">
-            <span className="text-[10px] text-slate-500 uppercase tracking-widest">Rover</span>
+            <span className="text-[10px] text-slate-500 uppercase tracking-widest">Jetson</span>
             <div className="flex items-center gap-2 mt-1">
               <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></span>
-              <span className={`text-xs font-bold tracking-widest ${isConnected ? 'text-green-500' : 'text-red-500'}`}>
+              <span className={`text-xs font-bold tracking-widest ${isConnected ? 'text-green-400' : 'text-red-400'}`}>
                 {isConnected ? 'EN LÍNEA' : 'SIN SEÑAL'}
               </span>
             </div>
           </div>
+          {/* Estado Pico */}
           <div className="flex flex-col items-end">
-            <span className="text-[10px] text-slate-500 uppercase tracking-widest">Brazo SO101</span>
+            <span className="text-[10px] text-slate-500 uppercase tracking-widest">Pico USB</span>
             <div className="flex items-center gap-2 mt-1">
-              <span className={`w-2 h-2 rounded-full ${isArmConnected ? 'bg-blue-500 animate-pulse' : 'bg-red-500'}`}></span>
-              <span className={`text-xs font-bold tracking-widest ${isArmConnected ? 'text-blue-400' : 'text-red-500'}`}>
-                {isArmConnected ? 'EN LÍNEA' : 'SIN SEÑAL'}
+              <span className={`w-2 h-2 rounded-full ${isPicoConnected ? 'bg-yellow-400 animate-pulse' : 'bg-red-500'}`}></span>
+              <span className={`text-xs font-bold tracking-widest ${isPicoConnected ? 'text-yellow-400' : 'text-red-400'}`}>
+                {isPicoConnected ? 'CONECTADO' : 'DESCONECT.'}
               </span>
             </div>
           </div>
+          {/* Modo RC/GCS del Pico */}
+          <div className="flex flex-col items-end">
+            <span className="text-[10px] text-slate-500 uppercase tracking-widest">Pico Mode</span>
+            <span className={`text-xs font-bold tracking-widest mt-1 ${picoTelemetry.mode === 'RC' ? 'text-orange-400' : 'text-blue-400'}`}>
+              {picoTelemetry.mode}
+            </span>
+          </div>
+          {/* Gear */}
+          <button onClick={() => setShowSettings(true)}
+            className="text-slate-500 hover:text-white transition-colors text-lg px-2">
+            ⚙
+          </button>
         </div>
       </header>
 
-      {/* MAIN GRID: Video + Sidebar */}
-      <main className="grid grid-cols-12 gap-4 h-[55vh] mb-4">
+      {/* ── MAIN GRID ───────────────────────────────────────────────── */}
+      <main className="grid grid-cols-12 gap-4 h-[52vh] mb-4">
 
-        {/* VIDEO PRINCIPAL */}
+        {/* VIDEO FPV */}
         <section className="col-span-8 bg-black rounded-lg border border-slate-800 overflow-hidden relative flex flex-col">
           <div className="absolute top-4 left-4 z-10 bg-black/60 px-2 py-1 rounded text-[10px] text-green-500 border border-green-900 uppercase tracking-widest backdrop-blur-sm">
-            Cam-01 / Feed Principal
+            Cam-01 / FPV Principal
           </div>
+          {isEStopActive && (
+            <div className="absolute inset-0 z-20 bg-red-900/40 flex items-center justify-center">
+              <span className="text-red-400 font-black text-2xl tracking-widest animate-pulse">
+                ⛔ E-STOP
+              </span>
+            </div>
+          )}
           <img
-            src={`http://${JETSON_IP}:8000/video_feed`}
-            alt="Rover Main Camera"
+            src={`http://${jetsonIP}:8000/video_feed`}
+            alt="Rover FPV"
             className={`w-full h-full object-cover ${isEStopActive ? 'grayscale' : ''}`}
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
           />
         </section>
 
         {/* SIDEBAR */}
-        <aside className="col-span-4 flex flex-col gap-4">
+        <aside className="col-span-4 flex flex-col gap-3">
 
           {/* Control de Operaciones */}
-          <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg">
-            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Control de Operaciones</h3>
-            <div className="grid grid-cols-3 gap-2 mb-4">
-              {['MANUAL', 'AUTO', 'AI'].map((mode) => (
-                <button
-                  key={mode}
-                  onClick={() => setRoverMode(mode as any)}
+          <div className="bg-slate-900 border border-slate-800 p-3 rounded-lg">
+            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Control</h3>
+            <div className="grid grid-cols-3 gap-2 mb-3">
+              {(['MANUAL', 'AUTO', 'AI'] as RoverMode[]).map((mode) => (
+                <button key={mode}
+                  onClick={() => handleModeChange(mode)}
                   className={`py-2 text-[10px] font-bold rounded uppercase tracking-wider transition-colors ${
                     roverMode === mode
                       ? 'bg-green-900/50 text-green-400 border border-green-700'
                       : 'bg-slate-950 text-slate-500 border border-slate-800 hover:bg-slate-800'
-                  }`}
-                >
+                  }`}>
                   {mode}
                 </button>
               ))}
             </div>
-            <button
-              onClick={handleEStop}
-              className={`w-full py-3 rounded text-sm font-black uppercase tracking-widest transition-all ${
-                isEStopActive ? 'bg-red-600 text-white animate-pulse' : 'bg-red-950/50 text-red-500 border border-red-900'
-              }`}
-            >
-              {isEStopActive ? 'SISTEMA DETENIDO' : 'PARADA DE EMERGENCIA'}
+            <button onClick={handleEStop}
+              className={`w-full py-2.5 rounded text-sm font-black uppercase tracking-widest transition-all ${
+                isEStopActive
+                  ? 'bg-red-600 text-white animate-pulse'
+                  : 'bg-red-950/50 text-red-500 border border-red-900 hover:bg-red-900/30'
+              }`}>
+              {isEStopActive ? '⛔ DETENIDO — PULSAR PARA LIBERAR' : 'PARADA DE EMERGENCIA [E]'}
             </button>
           </div>
 
           {/* IMU */}
-          <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg">
-            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Unidad Inercial (IMU)</h3>
+          <div className="bg-slate-900 border border-slate-800 p-3 rounded-lg">
+            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">IMU — MPU6050</h3>
             <div className="grid grid-cols-3 gap-2 text-center">
-              <div className="bg-slate-950 border border-slate-800 p-2 rounded">
-                <div className="text-[9px] text-slate-500 mb-1">PITCH</div>
-                <div className="font-bold text-slate-200">{(telemetry?.pitch ?? 0).toFixed(1)}°</div>
-              </div>
-              <div className="bg-slate-950 border border-slate-800 p-2 rounded">
-                <div className="text-[9px] text-slate-500 mb-1">ROLL</div>
-                <div className="font-bold text-slate-200">{(telemetry?.roll ?? 0).toFixed(1)}°</div>
-              </div>
-              <div className="bg-slate-950 border border-slate-800 p-2 rounded">
-                <div className="text-[9px] text-slate-500 mb-1">YAW</div>
-                <div className="font-bold text-slate-200">{(telemetry?.yaw ?? 0).toFixed(1)}°</div>
-              </div>
+              {[
+                { label: 'PITCH', val: telemetry?.pitch ?? 0 },
+                { label: 'ROLL',  val: telemetry?.roll  ?? 0 },
+                { label: 'YAW',   val: telemetry?.yaw   ?? 0 },
+              ].map(({ label, val }) => (
+                <div key={label} className="bg-slate-950 border border-slate-800 p-2 rounded">
+                  <div className="text-[9px] text-slate-500 mb-1">{label}</div>
+                  <div className={`font-bold text-sm ${Math.abs(val) > 30 ? 'text-yellow-400' : 'text-slate-200'}`}>
+                    {val.toFixed(1)}°
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
 
           {/* Radar Perimetral */}
-          <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg">
-            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Radar Perimetral</h3>
-            <div className="grid grid-cols-3 gap-2 text-center mb-4">
-              <div className="bg-slate-950 border border-slate-800 p-2 rounded">
-                <div className="text-[9px] text-slate-500 mb-1">IZQ</div>
-                <div className="font-bold text-slate-200">{(telemetry?.distancia_izquierda ?? 0).toFixed(1)}m</div>
-              </div>
-              <div className="bg-slate-950 border border-slate-800 p-2 rounded">
-                <div className="text-[9px] text-slate-500 mb-1">FRONT</div>
-                <div className="font-bold text-slate-200">{(telemetry?.distancia_frontal ?? 0).toFixed(1)}m</div>
-              </div>
-              <div className="bg-slate-950 border border-slate-800 p-2 rounded">
-                <div className="text-[9px] text-slate-500 mb-1">DER</div>
-                <div className="font-bold text-slate-200">{(telemetry?.distancia_derecha ?? 0).toFixed(1)}m</div>
-              </div>
+          <div className="bg-slate-900 border border-slate-800 p-3 rounded-lg">
+            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Radar Perimetral — HC-SR04</h3>
+            <div className="grid grid-cols-3 gap-2 text-center mb-3">
+              {[
+                { label: 'IZQ',   val: telemetry?.distancia_izquierda ?? 0 },
+                { label: 'FRONT', val: telemetry?.distancia_frontal   ?? 0 },
+                { label: 'DER',   val: telemetry?.distancia_derecha   ?? 0 },
+              ].map(({ label, val }) => (
+                <div key={label} className={`bg-slate-950 border p-2 rounded ${val < 0.5 ? 'border-red-800' : val < 1.5 ? 'border-yellow-800' : 'border-slate-800'}`}>
+                  <div className="text-[9px] text-slate-500 mb-1">{label}</div>
+                  <div className={`font-bold text-sm ${val < 0.5 ? 'text-red-400' : val < 1.5 ? 'text-yellow-400' : 'text-slate-200'}`}>
+                    {val.toFixed(2)}m
+                  </div>
+                </div>
+              ))}
             </div>
-            <div className="w-full bg-slate-950 h-3 rounded-full overflow-hidden border border-slate-800">
-              <div
-                className={`h-full transition-all duration-300 ${distFrontal < 1.0 ? 'bg-red-500' : distFrontal < 2.5 ? 'bg-yellow-400' : 'bg-green-500'}`}
-                style={{ width: `${distancePercentage}%` }}
-              ></div>
+            <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800">
+              <div className={`h-full transition-all duration-150 ${distColor}`}
+                   style={{ width: `${distPct}%` }}></div>
             </div>
           </div>
 
-          {/* Terminal */}
-          <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex-1 overflow-hidden flex flex-col">
-            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Terminal de Sistema</h3>
-            <div className="text-[10px] leading-tight font-mono space-y-2 flex-1 overflow-y-auto">
-              <p className="text-slate-500">[{new Date().toLocaleTimeString()}] Sistema de navegación operativo.</p>
-              {isConnected && <p className="text-green-400">[{new Date().toLocaleTimeString()}] Rover SSE :8000 activo.</p>}
-              {isArmConnected && <p className="text-blue-400">[{new Date().toLocaleTimeString()}] Brazo SO101 conectado. Modo: {armTelemetry.mode}</p>}
+          {/* Control teclado visual */}
+          <div className="bg-slate-900 border border-slate-800 p-3 rounded-lg flex-1">
+            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">
+              Teclado {roverMode !== 'MANUAL' && <span className="text-yellow-600">(solo en MANUAL)</span>}
+            </h3>
+            <div className="flex flex-col items-center gap-1">
+              <div className="flex gap-1">
+                <div className={`w-9 h-9 rounded border text-[11px] font-bold flex items-center justify-center transition-colors ${
+                  isKeyActive(['w','ArrowUp']) ? 'bg-green-700 text-white border-green-500' : 'bg-slate-950 text-slate-500 border-slate-700'
+                }`}>▲</div>
+              </div>
+              <div className="flex gap-1">
+                {[['a','ArrowLeft','◄'],['s','ArrowDown','▼'],['d','ArrowRight','►']].map(([k1, k2, lbl]) => (
+                  <div key={k1} className={`w-9 h-9 rounded border text-[11px] font-bold flex items-center justify-center transition-colors ${
+                    isKeyActive([k1, k2]) ? 'bg-green-700 text-white border-green-500' : 'bg-slate-950 text-slate-500 border-slate-700'
+                  }`}>{lbl}</div>
+                ))}
+              </div>
+              <div className="text-[9px] text-slate-600 mt-1">WASD / flechas · Espacio=stop · E=Estop · R=reset odom</div>
             </div>
           </div>
+
         </aside>
       </main>
 
-      {/* ARM SECTION */}
-      <section className="grid grid-cols-12 gap-4 h-[22vh]">
+      {/* ── SECCIÓN PICO + ENCODERS + ODOMETRÍA ─────────────────────── */}
+      <section className="grid grid-cols-12 gap-4">
 
-        {/* Cámara del brazo */}
-        <div className="col-span-4 bg-black rounded-lg border border-slate-800 overflow-hidden relative">
-          <div className="absolute top-2 left-2 z-10 bg-black/60 px-2 py-1 rounded text-[10px] text-blue-400 border border-blue-900 uppercase tracking-widest backdrop-blur-sm">
-            Cam-02 / Brazo USB
-          </div>
-          <img
-            src={`http://${JETSON_IP}:8000/camera_usb`}
-            alt="Arm Camera"
-            className="w-full h-full object-cover"
-            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-          />
-        </div>
-
-        {/* Joints SO101 */}
+        {/* Encoders */}
         <div className="col-span-5 bg-slate-900 border border-slate-800 p-4 rounded-lg">
-          <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Brazo SO101 — Joints</h3>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-            {JOINT_NAMES.map((joint) => {
-              const val = (armTelemetry.arm as any)[joint] ?? 0;
-              const pct = Math.min(Math.abs(val) / Math.PI * 100, 100);
+          <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">
+            Encoders — Pico RP2040 · {picoTelemetry.mode}
+          </h3>
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { label: 'FL (Front-Left)',  val: encFL },
+              { label: 'FR (Front-Right)', val: encFR },
+              { label: 'RL (Rear-Left)',   val: encRL },
+              { label: 'RR (Rear-Right)',  val: encRR },
+            ].map(({ label, val }) => {
+              const pct = Math.min(Math.abs(val % 13440) / 13440 * 100, 100);
               return (
-                <div key={joint}>
+                <div key={label}>
                   <div className="flex justify-between text-[9px] mb-1">
-                    <span className="text-slate-500 uppercase">{JOINT_LABELS[joint]}</span>
-                    <span className="text-blue-300 font-bold">{val.toFixed(2)} rad</span>
+                    <span className="text-slate-500 uppercase">{label}</span>
+                    <span className="text-yellow-300 font-bold">{val}</span>
                   </div>
                   <div className="w-full bg-slate-950 h-1.5 rounded-full overflow-hidden border border-slate-800">
-                    <div
-                      className="h-full bg-blue-500 transition-all duration-200"
-                      style={{ width: `${pct}%` }}
-                    />
+                    <div className="h-full bg-yellow-500 transition-all duration-100"
+                         style={{ width: `${pct}%` }} />
                   </div>
                 </div>
               );
@@ -282,35 +483,71 @@ function App() {
           </div>
         </div>
 
-        {/* Odometría + Modo base */}
-        <div className="col-span-3 bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col gap-3">
-          <div>
-            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Odometría</h3>
-            <div className="grid grid-cols-3 gap-2 text-center">
-              <div className="bg-slate-950 border border-slate-800 p-2 rounded">
-                <div className="text-[9px] text-slate-500 mb-1">X</div>
-                <div className="font-bold text-slate-200 text-xs">{(armTelemetry.odom?.x ?? 0).toFixed(2)}m</div>
-              </div>
-              <div className="bg-slate-950 border border-slate-800 p-2 rounded">
-                <div className="text-[9px] text-slate-500 mb-1">Y</div>
-                <div className="font-bold text-slate-200 text-xs">{(armTelemetry.odom?.y ?? 0).toFixed(2)}m</div>
-              </div>
-              <div className="bg-slate-950 border border-slate-800 p-2 rounded">
-                <div className="text-[9px] text-slate-500 mb-1">θ</div>
-                <div className="font-bold text-slate-200 text-xs">{(armTelemetry.odom?.theta ?? 0).toFixed(2)}°</div>
-              </div>
+        {/* Odometría */}
+        <div className="col-span-3 bg-slate-900 border border-slate-800 p-4 rounded-lg">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Odometría Dead-Reckoning</h3>
+            <button onClick={() => sendCommand({ cmd: 'reset_odom' })}
+              className="text-[9px] text-slate-500 hover:text-white border border-slate-700 hover:border-slate-500 px-2 py-1 rounded transition-colors uppercase tracking-wider">
+              Reset [R]
+            </button>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div className="bg-slate-950 border border-slate-800 p-2 rounded">
+              <div className="text-[9px] text-slate-500 mb-1">X</div>
+              <div className="font-bold text-slate-200 text-xs">{(picoTelemetry.odom?.x ?? 0).toFixed(2)}m</div>
+            </div>
+            <div className="bg-slate-950 border border-slate-800 p-2 rounded">
+              <div className="text-[9px] text-slate-500 mb-1">Y</div>
+              <div className="font-bold text-slate-200 text-xs">{(picoTelemetry.odom?.y ?? 0).toFixed(2)}m</div>
+            </div>
+            <div className="bg-slate-950 border border-slate-800 p-2 rounded">
+              <div className="text-[9px] text-slate-500 mb-1">θ</div>
+              <div className="font-bold text-slate-200 text-xs">{(picoTelemetry.odom?.theta ?? 0).toFixed(1)}°</div>
             </div>
           </div>
-          <div>
-            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Modo Base</h3>
-            <div className={`text-center py-2 rounded border font-bold text-sm tracking-widest ${
-              armTelemetry.mode === 'RC'
-                ? 'bg-yellow-900/30 text-yellow-400 border-yellow-800'
-                : 'bg-blue-900/30 text-blue-400 border-blue-800'
-            }`}>
-              {armTelemetry.mode || 'RC'}
+          {/* Mini brújula visual */}
+          <div className="flex items-center justify-center mt-3">
+            <div className="relative w-16 h-16">
+              <div className="absolute inset-0 rounded-full border border-slate-700 bg-slate-950"></div>
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div
+                  className="w-0.5 h-7 bg-green-500 origin-bottom rounded"
+                  style={{ transform: `rotate(${picoTelemetry.odom?.theta ?? 0}deg)`, transformOrigin: '50% 100%' }}
+                ></div>
+              </div>
+              <div className="absolute top-0.5 left-1/2 -translate-x-1/2 text-[8px] text-slate-500">N</div>
             </div>
           </div>
+        </div>
+
+        {/* Terminal */}
+        <div className="col-span-4 bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col">
+          <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Terminal del Sistema</h3>
+          <div className="flex-1 overflow-y-auto text-[10px] leading-relaxed space-y-1 font-mono max-h-32">
+            {logs.map((log, i) => (
+              <p key={i} className={
+                log.includes('E-STOP') ? 'text-red-400' :
+                log.includes('✅') || log.includes('conectado') ? 'text-green-400' :
+                log.includes('⚠️') || log.includes('Modo') ? 'text-yellow-400' :
+                'text-slate-500'
+              }>{log}</p>
+            ))}
+          </div>
+          {/* RC Channels mini display */}
+          {picoTelemetry.ch && picoTelemetry.mode === 'RC' && (
+            <div className="mt-2 pt-2 border-t border-slate-800">
+              <div className="text-[9px] text-orange-500 mb-1 uppercase tracking-widest">RC Channels (µs)</div>
+              <div className="grid grid-cols-6 gap-1">
+                {picoTelemetry.ch.slice(0, 6).map((v, i) => (
+                  <div key={i} className="text-center">
+                    <div className="text-[8px] text-slate-600">CH{i+1}</div>
+                    <div className="text-[9px] text-orange-300 font-bold">{v}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
       </section>
