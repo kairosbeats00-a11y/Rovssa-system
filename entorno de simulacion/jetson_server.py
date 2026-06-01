@@ -117,6 +117,12 @@ except Exception:
         GPIO_AVAILABLE = False
         print("⚠️  GPIO no disponible — ultrasonidos deshabilitados")
 
+# ── Módulos de navegación autónoma (modo AI) ──────────────────────────────────
+from mission_executor import executor_loop, start_mission, stop_mission, get_mission_status
+from hardware_interface import HardwareInterface
+from yolo_detector import yolo_detector_thread
+from gps_reader import gps_reader_thread
+
 app = Flask(__name__)
 
 # =============================================================================
@@ -202,6 +208,13 @@ current_frame = None
 _frame_usb_lock = threading.Lock()
 current_frame_usb = None
 
+# ── Estado GPS (se puebla cuando se integre el M8N) ──────────────────────────
+_gps_lock = threading.Lock()
+gps_state = {"fix": False, "lat": 0.0, "lon": 0.0, "alt": 0.0, "sats": 0, "speed_ms": 0.0}
+
+# ── Detecciones YOLO (se puebla cuando se integre la inferencia) ──────────────
+_yolo_lock = threading.Lock()
+yolo_detections = {}   # {"bottle": {"cx": 320, "cy": 240, "area": 5000}, ...}
 # =============================================================================
 # CORS
 # =============================================================================
@@ -822,6 +835,8 @@ def _generate_telemetry():
     while True:
         with _telem_lock:
             data = dict(current_telemetry)
+        with _gps_lock:
+            data["gps"] = dict(gps_state)
         yield f"data: {json.dumps(data)}\n\n"
         time.sleep(0.1)
 
@@ -969,6 +984,47 @@ def command():
 
     return jsonify({"error": f"comando desconocido: {cmd}"}), 400
 
+# ── Misión autónoma (modo AI) ─────────────────────────────────────────────────
+
+@app.route('/mission', methods=['POST'])
+def mission_start():
+    """
+    Recibe la cola de objetivos desde la laptop y arranca el executor.
+    Body: {"objectives": [...]}
+    Solo funciona si el rover está en modo AI.
+    """
+    with _mode_lock:
+        if rover_mode != "AI":
+            return jsonify({"error": "El rover no está en modo AI"}), 400
+        if estop_active:
+            return jsonify({"error": "E-STOP activo"}), 403
+
+    try:
+        data = request.get_json(force=True)
+        objectives = data.get("objectives", [])
+        if not objectives:
+            return jsonify({"error": "Cola de objetivos vacía"}), 400
+    except Exception:
+        return jsonify({"error": "JSON inválido"}), 400
+
+    start_mission(objectives)
+    print(f"🚀 Misión iniciada con {len(objectives)} objetivos")
+    return jsonify({"status": "ok", "objectives_count": len(objectives)})
+
+
+@app.route('/mission/stop', methods=['POST'])
+def mission_stop():
+    """E-STOP de misión — detiene el executor en el próximo ciclo."""
+    stop_mission()
+    send_to_pico({"cmd": "stop"})
+    return jsonify({"status": "stopped"})
+
+
+@app.route('/mission/status', methods=['GET'])
+def mission_status():
+    """Estado actual de la misión para polling desde el frontend."""
+    return jsonify(get_mission_status())
+
 # ── GET /status — resumen general del sistema ─────────────────────────────────
 
 @app.route('/status')
@@ -1013,14 +1069,42 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"⚠️  BNO085 no disponible: {e}")
 
+    # Crear interfaz de hardware para el executor autónomo
+    _hw_interface = HardwareInterface(
+        send_to_pico_fn   = send_to_pico,
+        telem_lock        = _telem_lock,
+        telemetry_dict    = current_telemetry,
+        imu_lock          = _imu_lock,
+        imu_refs          = {"pitch": 0.0, "roll": 0.0, "yaw": 0.0},
+        gps_lock          = _gps_lock,
+        gps_dict          = gps_state,
+        yolo_lock         = _yolo_lock,
+        yolo_detections   = yolo_detections,
+    )
+
     threads = [
         threading.Thread(target=serial_reader_thread,    daemon=True, name="SerialRx"),
         threading.Thread(target=serial_writer_thread,    daemon=True, name="SerialTx"),
         threading.Thread(target=lambda: imu_thread(_bno_instance), daemon=True, name="IMU"),
         threading.Thread(target=ultrasonic_thread,       daemon=True, name="Ultrasonic"),
         threading.Thread(target=video_capture_thread,    daemon=True, name="Video-CSI"),
-        threading.Thread(target=video_capture_usb_thread, daemon=True, name="Video-USB"),  # ← NUEVO
+        threading.Thread(target=video_capture_usb_thread, daemon=True, name="Video-USB"),
         threading.Thread(target=autonomous_brain_thread, daemon=True, name="Brain"),
+       threading.Thread(target=lambda: executor_loop(_hw_interface), daemon=True, name="Executor"),
+        threading.Thread(
+            target=lambda: gps_reader_thread(
+                gps_lock = _gps_lock,
+                gps_dict = gps_state,
+            ),
+            daemon=True, name="GPS"
+        ),
+                frame_lock        = _frame_lock,
+                get_current_frame = lambda: current_frame,
+                yolo_lock         = _yolo_lock,
+                yolo_detections_dict = yolo_detections,
+            ),
+            daemon=True, name="YOLO"
+        ),
     ]
 
     for t in threads:

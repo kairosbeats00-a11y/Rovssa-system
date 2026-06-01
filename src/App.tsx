@@ -16,6 +16,14 @@ interface TelemetryData {
   distancia_frontal: number;
   distancia_izquierda: number;
   distancia_derecha: number;
+  gps?: {
+    fix: boolean;
+    lat: number;
+    lon: number;
+    alt: number;
+    sats: number;
+    speed_ms: number;
+  };
 }
 
 interface PicoTelemetry {
@@ -32,6 +40,26 @@ interface PicoTelemetry {
 }
 
 type RoverMode = 'MANUAL' | 'AUTO' | 'AI';
+
+interface GpsZone {
+  lat: number;
+  lon: number;
+  label: string;
+}
+
+interface MissionObjective {
+  action: string;
+  params: Record<string, unknown>;
+}
+
+interface MissionStatus {
+  active: boolean;
+  current: MissionObjective | null;
+  completed: Array<MissionObjective & { result: string }>;
+  pending: MissionObjective[];
+  status: 'IDLE' | 'RUNNING' | 'PAUSED' | 'DONE' | 'ERROR';
+  log: string[];
+}
 
 // ── Constantes de control ──────────────────────────────────────────────────
 const DRIVE_VX    = 0.7;   // velocidad lineal (0-1)
@@ -63,6 +91,14 @@ function App() {
 
   // Estado de la cámara USB del brazo
   const [armCamError, setArmCamError] = useState(false);
+
+  // ── Estado modo AI ────────────────────────────────────────────────────────
+  const [missionPrompt, setMissionPrompt]   = useState('');
+  const [zones, setZones]                   = useState<GpsZone[]>([]);
+  const [missionStatus, setMissionStatus]   = useState<MissionStatus | null>(null);
+  const [isPlanning, setIsPlanning]         = useState(false);
+  const [aiApiKey]                          = useState('XXXXXXXXXXXXXXXXXXXXXXXX');
+  const missionPollRef                      = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Keys actualmente presionadas para control de teclado
   const keysRef      = useRef<Set<string>>(new Set());
@@ -234,6 +270,141 @@ function App() {
   }, [roverMode, isEStopActive, sendCommand, computeDriveFromKeys]);
 
   // ── Guardar IP ──────────────────────────────────────────────────────────
+
+  // ── Modo AI: marcar zona GPS ──────────────────────────────────────────────
+  const markZone = useCallback((label: string) => {
+    const lat = telemetry.gps?.fix ? telemetry.gps.lat : 0;
+    const lon = telemetry.gps?.fix ? telemetry.gps.lon : 0;
+    if (!telemetry.gps?.fix) {
+      addLog('⚠️  GPS sin fix — zona marcada en 0,0 (corregir cuando haya señal)');
+    }
+    setZones(prev => {
+      const filtered = prev.filter(z => z.label !== label);
+      return [...filtered, { lat, lon, label }];
+    });
+    addLog(`📍 Zona ${label} marcada — lat:${lat.toFixed(6)} lon:${lon.toFixed(6)}`);
+  }, [telemetry, addLog]);
+
+  const removeZone = useCallback((label: string) => {
+    setZones(prev => prev.filter(z => z.label !== label));
+  }, []);
+
+  // ── Modo AI: polling de estado de misión ─────────────────────────────────
+  const startMissionPolling = useCallback(() => {
+    if (missionPollRef.current) clearInterval(missionPollRef.current);
+    missionPollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`http://${jetsonIP}:8000/mission/status`);
+        const data: MissionStatus = await res.json();
+        setMissionStatus(data);
+        if (data.status === 'DONE' || data.status === 'ERROR') {
+          clearInterval(missionPollRef.current!);
+          addLog(`Misión ${data.status === 'DONE' ? '✅ completada' : '❌ con error'}`);
+        }
+      } catch { /* jetson sin respuesta */ }
+    }, 1000);
+  }, [jetsonIP, addLog]);
+
+  useEffect(() => {
+    return () => { if (missionPollRef.current) clearInterval(missionPollRef.current); };
+  }, []);
+
+  // ── Modo AI: llamar a Deepseek y enviar misión a Jetson ──────────────────
+  const handleLaunchMission = useCallback(async () => {
+    if (!missionPrompt.trim()) return;
+    if (zones.length === 0) {
+      addLog('⚠️  Marcá al menos una zona GPS antes de lanzar');
+      return;
+    }
+
+    setIsPlanning(true);
+    addLog('🧠 Enviando prompt al planner...');
+
+    // Construir contexto de zonas para el LLM
+    const zonesContext = zones.map(z =>
+      `${z.label}: lat=${z.lat.toFixed(6)}, lon=${z.lon.toFixed(6)}`
+    ).join('\n');
+
+    const systemPrompt = `Eres el planner de un rover autónomo. 
+Tu única función es convertir instrucciones en lenguaje natural en una lista de objetivos JSON.
+Respondé ÚNICAMENTE con un array JSON válido, sin texto adicional, sin markdown, sin explicaciones.
+
+Zonas GPS disponibles:
+${zonesContext}
+
+Acciones disponibles:
+- NAVIGATE_TO: {"action":"NAVIGATE_TO","params":{"lat":float,"lon":float,"tolerance_m":float}}
+- SEARCH_AND_PICK: {"action":"SEARCH_AND_PICK","params":{"count":int,"target_class":"bottle"}}
+- DISCHARGE: {"action":"DISCHARGE","params":{}}
+- WAIT: {"action":"WAIT","params":{"seconds":float}}
+- STOP: {"action":"STOP","params":{}}
+
+Reglas:
+1. Siempre terminar con STOP.
+2. Para recolectar objetos: primero NAVIGATE_TO la zona, luego SEARCH_AND_PICK.
+3. Para descargar: primero NAVIGATE_TO la zona de descarga, luego DISCHARGE.
+4. tolerance_m por defecto 2.0.`;
+
+    try {
+      const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${aiApiKey}`,
+        },
+        body: JSON.stringify({
+          model: 'deepseek-chat',
+          max_tokens: 1000,
+          temperature: 0,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user',   content: missionPrompt },
+          ],
+        }),
+      });
+
+      if (!response.ok) throw new Error(`Deepseek error: ${response.status}`);
+
+      const data = await response.json();
+      const raw  = data.choices?.[0]?.message?.content ?? '';
+
+      // Parsear JSON — limpiar posibles backticks si el modelo los agregó
+      const clean = raw.replace(/```json|```/g, '').trim();
+      const objectives: MissionObjective[] = JSON.parse(clean);
+
+      addLog(`📋 Plan generado: ${objectives.length} objetivos`);
+      objectives.forEach((o, i) => addLog(`  ${i+1}. ${o.action}`));
+
+      // Enviar a la Jetson
+      const res = await fetch(`http://${jetsonIP}:8000/mission`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ objectives }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error ?? 'Error enviando misión');
+      }
+
+      addLog('🚀 Misión enviada a la Jetson — iniciando');
+      startMissionPolling();
+
+    } catch (e: any) {
+      addLog(`❌ Error: ${e.message}`);
+    } finally {
+      setIsPlanning(false);
+    }
+  }, [missionPrompt, zones, jetsonIP, aiApiKey, addLog, startMissionPolling]);
+
+  const handleStopMission = useCallback(async () => {
+    try {
+      await fetch(`http://${jetsonIP}:8000/mission/stop`, { method: 'POST' });
+      addLog('🛑 Misión detenida');
+      if (missionPollRef.current) clearInterval(missionPollRef.current);
+    } catch { addLog('⚠️  No se pudo detener la misión'); }
+  }, [jetsonIP, addLog]);
+
   const saveIP = () => {
     localStorage.setItem('rovssa_jetson_ip', ipInput);
     setJetsonIP(ipInput);
@@ -434,6 +605,31 @@ function App() {
             </button>
           </div>
 
+{/* GPS */}
+          <div className="bg-slate-900 border border-slate-800 p-3 rounded-lg">
+            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">
+              GPS — NEO-M8N
+              <span className={`ml-2 text-[9px] font-bold ${telemetry.gps?.fix ? 'text-green-400' : 'text-red-400'}`}>
+                {telemetry.gps?.fix ? `✓ FIX (${telemetry.gps.sats} sats)` : '✗ SIN FIX'}
+              </span>
+            </h3>
+            <div className="grid grid-cols-2 gap-2 text-center">
+              {[
+                { label: 'LAT',  val: telemetry.gps?.fix ? telemetry.gps.lat.toFixed(6)  : '---' },
+                { label: 'LON',  val: telemetry.gps?.fix ? telemetry.gps.lon.toFixed(6)  : '---' },
+                { label: 'ALT',  val: telemetry.gps?.fix ? `${telemetry.gps.alt.toFixed(1)}m` : '---' },
+                { label: 'VEL',  val: telemetry.gps?.fix ? `${telemetry.gps.speed_ms.toFixed(1)}m/s` : '---' },
+              ].map(({ label, val }) => (
+                <div key={label} className="bg-slate-950 border border-slate-800 p-2 rounded">
+                  <div className="text-[9px] text-slate-500 mb-1">{label}</div>
+                  <div className={`font-bold text-xs ${telemetry.gps?.fix ? 'text-slate-200' : 'text-slate-600'}`}>
+                    {val}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
           {/* IMU */}
           <div className="bg-slate-900 border border-slate-800 p-3 rounded-lg">
             <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">IMU — MPU6050</h3>
@@ -500,6 +696,145 @@ function App() {
 
         </aside>
       </main>
+
+{/* ── PANEL MODO AI ───────────────────────────────────────────────── */}
+      {roverMode === 'AI' && (
+        <section className="grid grid-cols-12 gap-4 mb-4">
+
+          {/* Prompt + zonas */}
+          <div className="col-span-5 bg-slate-900 border border-purple-900/50 p-4 rounded-lg flex flex-col gap-3">
+            <h3 className="text-[10px] font-bold text-purple-400 uppercase tracking-widest">
+              🧠 Misión Autónoma
+            </h3>
+
+            <textarea
+              value={missionPrompt}
+              onChange={e => setMissionPrompt(e.target.value)}
+              placeholder="Ej: buscá 4 botellas en zona A y descargalas en zona B"
+              rows={3}
+              className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-purple-600 resize-none font-mono"
+            />
+
+            {/* Zonas GPS */}
+            <div className="flex gap-2">
+              {['A','B','C'].map(label => {
+                const zone = zones.find(z => z.label === label);
+                return (
+                  <div key={label} className="flex-1">
+                    <button
+                      onClick={() => zone ? removeZone(label) : markZone(label)}
+                      className={`w-full py-1.5 text-[10px] font-bold rounded uppercase tracking-wider transition-colors border ${
+                        zone
+                          ? 'bg-green-900/40 text-green-400 border-green-700'
+                          : 'bg-slate-950 text-slate-500 border-slate-700 hover:border-purple-700 hover:text-purple-400'
+                      }`}>
+                      {zone ? `✓ Zona ${label}` : `+ Zona ${label}`}
+                    </button>
+                    {zone && (
+                      <p className="text-[8px] text-slate-600 text-center mt-0.5 font-mono">
+                        {zone.lat.toFixed(5)}, {zone.lon.toFixed(5)}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Botones acción */}
+            <div className="flex gap-2">
+              <button
+                onClick={handleLaunchMission}
+                disabled={isPlanning || !missionPrompt.trim()}
+                className="flex-1 py-2 text-[10px] font-black rounded uppercase tracking-wider transition-colors bg-purple-900/50 text-purple-300 border border-purple-700 hover:bg-purple-800/50 disabled:opacity-30 disabled:cursor-not-allowed">
+                {isPlanning ? '⏳ Planificando...' : '🚀 Lanzar Misión'}
+              </button>
+              <button
+                onClick={handleStopMission}
+                className="py-2 px-4 text-[10px] font-black rounded uppercase tracking-wider bg-red-950/50 text-red-400 border border-red-900 hover:bg-red-900/30 transition-colors">
+                ■ Stop
+              </button>
+            </div>
+          </div>
+
+          {/* Estado de misión */}
+          <div className="col-span-4 bg-slate-900 border border-purple-900/50 p-4 rounded-lg flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <h3 className="text-[10px] font-bold text-purple-400 uppercase tracking-widest">Estado</h3>
+              {missionStatus && (
+                <span className={`text-[9px] font-bold px-2 py-0.5 rounded uppercase tracking-wider ${
+                  missionStatus.status === 'RUNNING' ? 'bg-green-900/50 text-green-400' :
+                  missionStatus.status === 'DONE'    ? 'bg-blue-900/50 text-blue-400'  :
+                  missionStatus.status === 'ERROR'   ? 'bg-red-900/50 text-red-400'    :
+                  missionStatus.status === 'PAUSED'  ? 'bg-yellow-900/50 text-yellow-400' :
+                  'bg-slate-800 text-slate-500'
+                }`}>{missionStatus.status}</span>
+              )}
+            </div>
+
+            {missionStatus ? (
+              <>
+                {/* Objetivo actual */}
+                {missionStatus.current && (
+                  <div className="bg-slate-950 border border-purple-900/30 rounded px-3 py-2">
+                    <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-0.5">Ejecutando</p>
+                    <p className="text-xs text-purple-300 font-bold">{missionStatus.current.action}</p>
+                  </div>
+                )}
+
+                {/* Barra de progreso */}
+                {(() => {
+                  const total = missionStatus.completed.length + missionStatus.pending.length + (missionStatus.current ? 1 : 0);
+                  const done  = missionStatus.completed.length;
+                  const pct   = total > 0 ? Math.round((done / total) * 100) : 0;
+                  return (
+                    <div>
+                      <div className="flex justify-between text-[9px] text-slate-500 mb-1">
+                        <span>{done}/{total} objetivos</span>
+                        <span>{pct}%</span>
+                      </div>
+                      <div className="w-full bg-slate-950 h-1.5 rounded-full overflow-hidden border border-slate-800">
+                        <div className="h-full bg-purple-600 transition-all duration-500"
+                             style={{ width: `${pct}%` }} />
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Completados */}
+                <div className="flex flex-col gap-1 overflow-y-auto max-h-24">
+                  {missionStatus.completed.map((o, i) => (
+                    <div key={i} className="flex items-center gap-2 text-[9px]">
+                      <span className={o.result === 'OK' ? 'text-green-500' : 'text-red-500'}>
+                        {o.result === 'OK' ? '✓' : '✗'}
+                      </span>
+                      <span className="text-slate-500">{o.action}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <p className="text-[10px] text-slate-600 italic">Sin misión activa</p>
+            )}
+          </div>
+
+          {/* Log de misión */}
+          <div className="col-span-3 bg-slate-900 border border-purple-900/50 p-4 rounded-lg flex flex-col">
+            <h3 className="text-[10px] font-bold text-purple-400 uppercase tracking-widest mb-2">Log IA</h3>
+            <div className="flex-1 overflow-y-auto text-[9px] leading-relaxed space-y-0.5 font-mono max-h-40">
+              {(missionStatus?.log ?? []).map((line, i) => (
+                <p key={i} className={
+                  line.includes('✅') || line.includes('completad') ? 'text-green-400' :
+                  line.includes('❌') || line.includes('Error')     ? 'text-red-400'   :
+                  line.includes('⚠️')                               ? 'text-yellow-400':
+                  line.includes('🚀') || line.includes('▶')         ? 'text-purple-400':
+                  'text-slate-500'
+                }>{line}</p>
+              ))}
+            </div>
+          </div>
+
+        </section>
+      )}
 
       {/* ── SECCIÓN PICO + ENCODERS + ODOMETRÍA ─────────────────────── */}
       <section className="grid grid-cols-12 gap-4">
