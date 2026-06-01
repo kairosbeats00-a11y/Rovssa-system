@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import MissionPanel from './MissionPanel';
+import RoverMap from './RoverMap';
 
 // ── IP de la Jetson ────────────────────────────────────────────────────────
 // Prioridad: var de entorno (build) → localStorage → fallback
@@ -541,26 +542,15 @@ function App() {
             </div>
           </div>
 
-          {/* Control teclado visual */}
-          <div className="bg-slate-900 border border-slate-800 p-3 rounded-lg flex-1">
-            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">
-              Teclado {roverMode !== 'MANUAL' && <span className="text-yellow-600">(solo en MANUAL)</span>}
-            </h3>
-            <div className="flex flex-col items-center gap-1">
-              <div className="flex gap-1">
-                <div className={`w-9 h-9 rounded border text-[11px] font-bold flex items-center justify-center transition-colors ${
-                  isKeyActive(['w','ArrowUp']) ? 'bg-green-700 text-white border-green-500' : 'bg-slate-950 text-slate-500 border-slate-700'
-                }`}>▲</div>
-              </div>
-              <div className="flex gap-1">
-                {[['a','ArrowLeft','◄'],['s','ArrowDown','▼'],['d','ArrowRight','►']].map(([k1, k2, lbl]) => (
-                  <div key={k1} className={`w-9 h-9 rounded border text-[11px] font-bold flex items-center justify-center transition-colors ${
-                    isKeyActive([k1, k2]) ? 'bg-green-700 text-white border-green-500' : 'bg-slate-950 text-slate-500 border-slate-700'
-                  }`}>{lbl}</div>
-                ))}
-              </div>
-              <div className="text-[9px] text-slate-600 mt-1">WASD / flechas · Espacio=stop · E=Estop · R=reset odom</div>
-            </div>
+          {/* Mapa GPS en tiempo real */}
+          <div className="bg-slate-900 border border-slate-800 rounded-lg flex-1 overflow-hidden flex flex-col" style={{ minHeight: '220px' }}>
+            <RoverMap
+              lat={telemetry.gps?.lat ?? 0}
+              lon={telemetry.gps?.lon ?? 0}
+              yaw={telemetry.yaw ?? 0}
+              fix={telemetry.gps?.fix ?? false}
+              sats={telemetry.gps?.sats ?? 0}
+            />
           </div>
 
         </aside>
@@ -646,32 +636,15 @@ function App() {
         </div>
 
         {/* Terminal */}
-        <div className="col-span-4 bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col">
-          <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Terminal del Sistema</h3>
-          <div className="flex-1 overflow-y-auto text-[10px] leading-relaxed space-y-1 font-mono max-h-32">
-            {logs.map((log, i) => (
-              <p key={i} className={
-                log.includes('E-STOP') ? 'text-red-400' :
-                log.includes('✅') || log.includes('conectado') ? 'text-green-400' :
-                log.includes('⚠️') || log.includes('Modo') ? 'text-yellow-400' :
-                'text-slate-500'
-              }>{log}</p>
-            ))}
-          </div>
-          {/* RC Channels mini display */}
-          {picoTelemetry.ch && picoTelemetry.mode === 'RC' && (
-            <div className="mt-2 pt-2 border-t border-slate-800">
-              <div className="text-[9px] text-orange-500 mb-1 uppercase tracking-widest">RC Channels (µs)</div>
-              <div className="grid grid-cols-6 gap-1">
-                {picoTelemetry.ch.slice(0, 6).map((v, i) => (
-                  <div key={i} className="text-center">
-                    <div className="text-[8px] text-slate-600">CH{i+1}</div>
-                    <div className="text-[9px] text-orange-300 font-bold">{v}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+        {/* Mapa GPS grande */}
+        <div className="col-span-4 bg-slate-900 border border-slate-800 rounded-lg overflow-hidden flex flex-col" style={{ minHeight: '200px' }}>
+          <RoverMap
+            lat={telemetry.gps?.lat ?? 0}
+            lon={telemetry.gps?.lon ?? 0}
+            yaw={telemetry.yaw ?? 0}
+            fix={telemetry.gps?.fix ?? false}
+            sats={telemetry.gps?.sats ?? 0}
+          />
         </div>
 
       </section>
