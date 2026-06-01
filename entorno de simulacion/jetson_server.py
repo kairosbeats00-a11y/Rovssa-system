@@ -35,6 +35,9 @@ Pico:
 Cámara FPV:
     CSI (ribbon) → conector CSI Jetson Nano, o USB → /dev/video0
 
+Cámara Brazo (USB):
+    USB → /dev/video1  (ajustar CAMERA_ARM_USB_INDEX si es distinto)
+
 ═══════════════════════════════════════════════════════════════════════════
 EJECUCIÓN:
     python3 jetson_server.py
@@ -62,20 +65,42 @@ except ImportError:
     SERIAL_AVAILABLE = False
     print("⚠️  pyserial no instalado. pip3 install pyserial")
 
-try:
-    import smbus2
-    I2C_AVAILABLE = True
-except ImportError:
-    I2C_AVAILABLE = False
-    print("⚠️  smbus2 no instalado. pip3 install smbus2")
+I2C_AVAILABLE = False
 
+import subprocess as _subprocess
+
+def _check_gstreamer():
+    """Verifica que gst-launch-1.0 está disponible en el sistema."""
+    try:
+        r = _subprocess.run(
+            ['gst-launch-1.0', '--version'],
+            stdout=_subprocess.PIPE, stderr=_subprocess.PIPE, timeout=3
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+GST_AVAILABLE = _check_gstreamer()
+if GST_AVAILABLE:
+    print("✅ GStreamer disponible")
+else:
+    print("⚠️  GStreamer no encontrado — video deshabilitado")
+# Alias para no cambiar el resto del código
+CV2_AVAILABLE = False
+
+# Inicializar BNO085 antes de GPIO para evitar conflicto de bus I2C
+_bno_instance = None
 try:
-    import cv2
-    import numpy as np
-    CV2_AVAILABLE = True
-except ImportError:
-    CV2_AVAILABLE = False
-    print("⚠️  OpenCV no instalado. sudo apt install python3-opencv")
+    import board as _board
+    import busio as _busio
+    from adafruit_bno08x.i2c import BNO08X_I2C as _BNO08X_I2C
+    from adafruit_bno08x import BNO_REPORT_ROTATION_VECTOR as _BNO_RV
+    _i2c_bus = _busio.I2C(_board.SCL, _board.SDA)
+    _bno_instance = _BNO08X_I2C(_i2c_bus, address=0x4B)
+    _bno_instance.enable_feature(_BNO_RV)
+    print("✅ BNO085 pre-inicializado")
+except Exception as _e:
+    print(f"⚠️  BNO085 no disponible: {_e}")
 
 try:
     import Jetson.GPIO as GPIO
@@ -111,14 +136,19 @@ US_FRONT_TRIG = 17;  US_FRONT_ECHO = 27   # pines 11 y 13
 US_LEFT_TRIG  = 22;  US_LEFT_ECHO  = 23   # pines 15 y 16
 US_RIGHT_TRIG = 24;  US_RIGHT_ECHO = 10   # pines 18 y 19
 
-# Cámara FPV
+# Cámara FPV CSI
 CAMERA_CSI_PIPELINE = (
     "nvarguscamerasrc ! "
     "video/x-raw(memory:NVMM),width=640,height=480,framerate=30/1 ! "
     "nvvidconv ! video/x-raw,format=BGRx ! "
     "videoconvert ! video/x-raw,format=BGR ! appsink drop=1"
 )
-CAMERA_USB_INDEX = 0    # /dev/video0 — fallback si no hay CSI
+CAMERA_USB_INDEX = 0    # /dev/video0 — fallback CSI si no hay CSI
+
+# ── CÁMARA BRAZO (USB) ────────────────────────────────────────────────────────
+# Ajustar al índice real: ls /dev/video*
+# Si la CSI ocupa /dev/video0, la USB suele quedar en /dev/video1
+CAMERA_ARM_USB_INDEX = 1   # → /dev/video1
 
 # Odometría — ajustar según tu rover real
 WHEEL_DIAMETER_M  = 0.12    # diámetro rueda en metros (medir con regla)
@@ -164,9 +194,13 @@ estop_active = False
 # Cola de comandos para el hilo serial writer
 _cmd_queue = queue.Queue(maxsize=10)
 
-# Frame JPEG actual para el stream de video
+# Frame JPEG actual — cámara CSI principal
 _frame_lock = threading.Lock()
 current_frame = None
+
+# Frame JPEG actual — cámara USB brazo  ← NUEVO
+_frame_usb_lock = threading.Lock()
+current_frame_usb = None
 
 # =============================================================================
 # CORS
@@ -323,92 +357,70 @@ def send_to_pico(cmd: dict):
 # Registros: https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Register-Map1.pdf
 # =============================================================================
 
+# BNO085 — dirección I2C
+BNO085_ADDR = 0x4B
+
 # Filtro complementario IMU
 _imu_pitch = 0.0
 _imu_roll  = 0.0
 _imu_yaw   = 0.0
 _imu_lock  = threading.Lock()
-COMP_ALPHA = 0.96   # peso del giroscopio (0.96 es estándar)
 
-def _read_word_2c(bus, addr, reg):
-    """Lee un entero con signo de 16 bits del MPU6050."""
-    high = bus.read_byte_data(addr, reg)
-    low  = bus.read_byte_data(addr, reg + 1)
-    val  = (high << 8) | low
-    return val - 65536 if val > 32767 else val
-
-def imu_thread():
+def imu_thread(bno=None):
     global _imu_pitch, _imu_roll, _imu_yaw
 
-    if not I2C_AVAILABLE:
-        print("⚠️  I2C no disponible — IMU deshabilitada")
+    print(f"🧭 Iniciando IMU BNO085 (addr 0x{BNO085_ADDR:02X})...")
+
+    if bno is None:
+        print("⚠️  BNO085 no inicializado — IMU deshabilitada")
         return
+    
+    print("✅ BNO085 listo")
 
-    print(f"🧭 Iniciando IMU MPU6050 (I2C bus {I2C_BUS}, addr 0x{MPU6050_ADDR:02X})...")
+    import math as _math
 
-    bus = None
-    while bus is None:
-        try:
-            bus = smbus2.SMBus(I2C_BUS)
-            # Wake up MPU6050 (registro PWR_MGMT_1 = 0x6B, escribir 0 para salir de sleep)
-            bus.write_byte_data(MPU6050_ADDR, 0x6B, 0x00)
-            # Rango acelerómetro: ±2g → 16384 LSB/g
-            bus.write_byte_data(MPU6050_ADDR, 0x1C, 0x00)
-            # Rango giroscopio: ±250°/s → 131 LSB/(°/s)
-            bus.write_byte_data(MPU6050_ADDR, 0x1B, 0x00)
-            print("✅ MPU6050 inicializado")
-        except Exception as e:
-            print(f"⚠️  MPU6050 no encontrado ({e}). Reintentando en 3s...")
-            bus = None
-            time.sleep(3)
-
-    dt = 0.02  # 50 Hz
     while True:
-        t0 = time.time()
         try:
-            # Leer 14 bytes desde ACCEL_XOUT_H (0x3B)
-            raw = bus.read_i2c_block_data(MPU6050_ADDR, 0x3B, 14)
+            quat = bno.quaternion
+            if quat is None:
+                time.sleep(0.02)
+                continue
 
-            ax = ((raw[0] << 8) | raw[1]) - (65536 if (raw[0] & 0x80) else 0)
-            ay = ((raw[2] << 8) | raw[3]) - (65536 if (raw[2] & 0x80) else 0)
-            az = ((raw[4] << 8) | raw[5]) - (65536 if (raw[4] & 0x80) else 0)
-            # raw[6..7] = temperatura (ignorar)
-            gx = ((raw[8]  << 8) | raw[9])  - (65536 if (raw[8]  & 0x80) else 0)
-            gy = ((raw[10] << 8) | raw[11]) - (65536 if (raw[10] & 0x80) else 0)
-            gz = ((raw[12] << 8) | raw[13]) - (65536 if (raw[12] & 0x80) else 0)
+            i, j, k, real = quat
 
-            # Escalar
-            ax_g = ax / 16384.0
-            ay_g = ay / 16384.0
-            az_g = az / 16384.0
-            gx_ds = gx / 131.0   # grados/segundo
-            gy_ds = gy / 131.0
-            gz_ds = gz / 131.0
+            # Quaternion → Euler (pitch, roll, yaw) en grados
+            sinr_cosp = 2.0 * (real * i + j * k)
+            cosr_cosp = 1.0 - 2.0 * (i * i + j * j)
+            pitch = _math.degrees(_math.atan2(sinr_cosp, cosr_cosp))
 
-            # Pitch y roll desde acelerómetro (atan2, grados)
-            accel_pitch = math.degrees(math.atan2(ay_g, math.sqrt(ax_g**2 + az_g**2)))
-            accel_roll  = math.degrees(math.atan2(-ax_g, az_g))
+            sinp = 2.0 * (real * j - k * i)
+            sinp = max(-1.0, min(1.0, sinp))
+            roll = _math.degrees(_math.asin(sinp))
+
+            siny_cosp = 2.0 * (real * k + i * j)
+            cosy_cosp = 1.0 - 2.0 * (j * j + k * k)
+            yaw = _math.degrees(_math.atan2(siny_cosp, cosy_cosp))
 
             with _imu_lock:
-                # Filtro complementario
-                _imu_pitch = COMP_ALPHA * (_imu_pitch + gx_ds * dt) + (1 - COMP_ALPHA) * accel_pitch
-                _imu_roll  = COMP_ALPHA * (_imu_roll  + gy_ds * dt) + (1 - COMP_ALPHA) * accel_roll
-                _imu_yaw  += gz_ds * dt   # integración pura (deriva con tiempo)
+                _imu_pitch = pitch
+                _imu_roll  = roll
+                _imu_yaw   = yaw
 
-            # Actualizar telemetría
             with _telem_lock:
-                current_telemetry["pitch"] = round(_imu_pitch, 2)
-                current_telemetry["roll"]  = round(_imu_roll,  2)
-                current_telemetry["yaw"]   = round(_imu_yaw,   2)
+                current_telemetry["pitch"] = round(pitch, 2)
+                current_telemetry["roll"]  = round(roll,  2)
+                current_telemetry["yaw"]   = round(yaw,   2)
 
         except Exception as e:
-            print(f"⚠️  Error leyendo IMU: {e}")
-            time.sleep(1)
+            # El sensor se resetó (vibraciones) — re-habilitar feature y continuar
+            try:
+                from adafruit_bno08x import BNO_REPORT_ROTATION_VECTOR
+                bno.enable_feature(BNO_REPORT_ROTATION_VECTOR)
+            except Exception:
+                pass
+            time.sleep(0.1)
 
-        # Mantener 50 Hz
-        elapsed = time.time() - t0
-        time.sleep(max(0, dt - elapsed))
-
+        time.sleep(0.02)  # 50 Hz
 # =============================================================================
 # HILO: ULTRASONIDOS HC-SR04 (3 sensores)
 # =============================================================================
@@ -484,59 +496,245 @@ def ultrasonic_thread():
         time.sleep(0.005)
 
 # =============================================================================
-# HILO: CÁMARA FPV
+# HILO: CÁMARA FPV CSI (principal — sin tocar)
 # =============================================================================
+
+JPEG_TMP = "/tmp/rovssa_frame.jpg"
+_GST_PIPELINES = [
+    "nvarguscamerasrc ! video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1 ! nvvidconv ! video/x-raw,format=I420 ! jpegenc quality=70 ! multifilesink location=/tmp/rovssa_frame.jpg",
+    "nvarguscamerasrc ! video/x-raw(memory:NVMM),width=1920,height=1080,framerate=30/1 ! nvvidconv ! video/x-raw,format=I420 ! jpegenc quality=70 ! multifilesink location=/tmp/rovssa_frame.jpg",
+    "v4l2src device=/dev/video0 ! videoconvert ! video/x-raw,format=I420 ! videoscale ! video/x-raw,width=640,height=480 ! jpegenc quality=70 ! multifilesink location=/tmp/rovssa_frame.jpg",
+]
+
+def _parse_jpeg_frames(pipe_stdout):
+    """
+    Lee bytes del stdout de gst-launch y los corta en frames JPEG completos.
+    JPEG: empieza con FF D8, termina con FF D9.
+    Generador — hace yield de bytes de cada frame completo.
+    """
+    buf = b""
+    CHUNK = 65536  # 64 KB por lectura
+
+    while True:
+        chunk = pipe_stdout.read(CHUNK)
+        if not chunk:
+            break
+        buf += chunk
+
+        # Buscar y emitir todos los JPEGs completos que haya en el buffer
+        while True:
+            start = buf.find(b"\xff\xd8")
+            if start == -1:
+                buf = b""          # no hay inicio — descartar todo
+                break
+            end = buf.find(b"\xff\xd9", start + 2)
+            if end == -1:
+                buf = buf[start:]  # inicio encontrado pero sin fin — esperar más datos
+                break
+            # Frame completo [start : end+2]
+            yield buf[start : end + 2]
+            buf = buf[end + 2:]
 
 def video_capture_thread():
     global current_frame
 
-    if not CV2_AVAILABLE:
-        print("⚠️  OpenCV no disponible — video deshabilitado")
+    if not GST_AVAILABLE:
+        print("⚠️  GStreamer no disponible — video CSI deshabilitado")
         return
 
-    cap = None
+    import os as _os
 
-    # Intentar CSI primero (Jetson Nano con cámara de módulo)
-    print("📷 Intentando abrir cámara CSI...")
-    try:
-        cap = cv2.VideoCapture(CAMERA_CSI_PIPELINE, cv2.CAP_GSTREAMER)
-        if not cap.isOpened():
-            cap = None
-    except Exception:
-        cap = None
-
-    # Fallback: USB
-    if cap is None:
-        print(f"📷 CSI no disponible. Intentando USB /dev/video{CAMERA_USB_INDEX}...")
-        cap = cv2.VideoCapture(CAMERA_USB_INDEX)
-        if not cap.isOpened():
-            print("⚠️  No se encontró ninguna cámara")
-            return
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 30)
-
-    print("✅ Cámara abierta")
-
-    encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70]
+    CMD = [
+        'gst-launch-1.0', 'nvarguscamerasrc', '!',
+        'video/x-raw(memory:NVMM),width=640,height=480,framerate=15/1', '!',
+        'nvvidconv', '!', 'video/x-raw,format=I420', '!',
+        'jpegenc', 'quality=50', '!',
+        'multifilesink', 'location=/tmp/rovssa_frame.jpg'
+    ]
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("⚠️  Frame perdido, reintentando...")
-            time.sleep(0.1)
-            continue
+        print("📷 Iniciando cámara CSI GStreamer...")
+        try:
+            proc = _subprocess.Popen(
+                CMD,
+                stdout=_subprocess.DEVNULL,
+                stderr=_subprocess.DEVNULL,
+            )
+            time.sleep(2.0)
+            if proc.poll() is not None:
+                print("⚠️  GStreamer CSI cerró inmediatamente. Reintentando en 5s...")
+                time.sleep(5)
+                continue
 
-        ok, jpeg = cv2.imencode('.jpg', frame, encode_params)
-        if ok:
-            with _frame_lock:
-                current_frame = jpeg.tobytes()
+            print("✅ Cámara CSI GStreamer abierta")
 
-        time.sleep(0.033)   # ~30 FPS
+            while proc.poll() is None:
+                try:
+                    if _os.path.exists('/tmp/rovssa_frame.jpg'):
+                        with open('/tmp/rovssa_frame.jpg', 'rb') as f:
+                            data = f.read()
+                        if data and len(data) > 500:
+                            with _frame_lock:
+                                current_frame = data
+                except Exception:
+                    pass
+                time.sleep(0.033)
+
+            print("⚠️  Proceso GStreamer CSI terminó. Reintentando en 3s...")
+            time.sleep(3)
+
+        except Exception as e:
+            print("⚠️  Error cámara CSI: " + str(e))
+            time.sleep(3)
 
 # =============================================================================
-# HILO: CEREBRO AUTÓNOMO — evasión de obstáculos con 3 ultrasonidos
-# Solo activo cuando rover_mode == "AUTO" y no hay E-Stop
+# HILO: CÁMARA USB BRAZO (nueva — independiente de la CSI)
+# Usa v4l2src con el índice CAMERA_ARM_USB_INDEX (/dev/video1 por defecto).
+# Si GStreamer no está disponible intenta leer el archivo directamente
+# (modo de compatibilidad mínima).
+# =============================================================================
+
+JPEG_TMP_USB = "/tmp/rovssa_frame_usb.jpg"
+
+def video_capture_usb_thread():
+    """Captura MJPEG de la cámara USB del brazo mecánico.
+    La cámara entrega MJPEG nativo — se usa jpegparse directo, sin conversión."""
+    global current_frame_usb
+
+    import os as _os
+
+    device = f"/dev/video{CAMERA_ARM_USB_INDEX}"
+
+    if not GST_AVAILABLE:
+        print(f"⚠️  GStreamer no disponible — cámara USB brazo ({device}) deshabilitada")
+        return
+
+    CMD = [
+        'gst-launch-1.0',
+        'v4l2src', f'device={device}', '!',
+        'image/jpeg,width=640,height=480,framerate=30/1', '!',
+        'jpegparse', '!',
+        'multifilesink', f'location={JPEG_TMP_USB}'
+    ]
+
+    while True:
+        if not _os.path.exists(device):
+            print(f"⚠️  Cámara brazo {device} no encontrada. Reintentando en 5s...")
+            time.sleep(5)
+            continue
+
+        print(f"📷 Iniciando cámara USB brazo ({device}) — MJPEG nativo...")
+        try:
+            proc = _subprocess.Popen(
+                CMD,
+                stdout=_subprocess.DEVNULL,
+                stderr=_subprocess.PIPE,
+            )
+            time.sleep(2.0)
+
+            if proc.poll() is not None:
+                err = proc.stderr.read().decode('utf-8', errors='ignore')
+                print(f"⚠️  GStreamer USB cerró inmediatamente:\n{err}")
+                time.sleep(5)
+                continue
+
+            print(f"✅ Cámara USB brazo abierta")
+
+            while proc.poll() is None:
+                try:
+                    if _os.path.exists(JPEG_TMP_USB):
+                        with open(JPEG_TMP_USB, 'rb') as f:
+                            data = f.read()
+                        if data and len(data) > 500:
+                            with _frame_usb_lock:
+                                current_frame_usb = data
+                except Exception:
+                    pass
+                time.sleep(0.033)
+
+            err = proc.stderr.read().decode('utf-8', errors='ignore')
+            print(f"⚠️  GStreamer USB terminó. {err[:200] if err else ''} Reintentando en 5s...")
+            time.sleep(5)
+
+        except Exception as e:
+            print(f"⚠️  Error cámara USB brazo: {e}")
+            time.sleep(5)
+
+    import os as _os
+
+    device = f"/dev/video{CAMERA_ARM_USB_INDEX}"
+
+    if not GST_AVAILABLE:
+        print(f"⚠️  GStreamer no disponible — cámara USB brazo ({device}) deshabilitada")
+        return
+
+    # Pipeline v4l2src → JPEG → multifilesink (archivo temporal)
+    CMD = [
+        'gst-launch-1.0',
+        'v4l2src', f'device={device}', '!',
+        'image/jpeg,width=320,height=240,framerate=15/1', '!',
+        'multifilesink', f'location={JPEG_TMP_USB}'
+    ]
+
+    # Pipeline de respaldo si la cámara no entrega JPEG nativo
+    CMD_FALLBACK = [
+        'gst-launch-1.0',
+        'v4l2src', f'device={device}', '!',
+        'videoconvert', '!',
+        'video/x-raw,format=I420,width=640,height=480', '!',
+        'jpegenc', 'quality=70', '!',
+        'multifilesink', f'location={JPEG_TMP_USB}'
+    ]
+
+    while True:
+        # Verificar que el dispositivo existe antes de abrir GStreamer
+        if not _os.path.exists(device):
+            print(f"⚠️  Cámara brazo {device} no encontrada. Reintentando en 5s...")
+            time.sleep(5)
+            continue
+
+        print(f"📷 Iniciando cámara USB brazo ({device})...")
+
+        # Intentar primero con JPEG nativo, luego con conversión
+        for attempt, cmd in enumerate([CMD, CMD_FALLBACK]):
+            try:
+                proc = _subprocess.Popen(
+                    cmd,
+                    stdout=_subprocess.DEVNULL,
+                    stderr=_subprocess.DEVNULL,
+                )
+                time.sleep(2.0)
+
+                if proc.poll() is not None:
+                    print(f"⚠️  GStreamer USB (intento {attempt+1}) cerró inmediatamente.")
+                    continue
+
+                print(f"✅ Cámara USB brazo abierta (pipeline {attempt+1})")
+
+                while proc.poll() is None:
+                    try:
+                        if _os.path.exists(JPEG_TMP_USB):
+                            with open(JPEG_TMP_USB, 'rb') as f:
+                                data = f.read()
+                            if data and len(data) > 500:
+                                with _frame_usb_lock:
+                                    current_frame_usb = data
+                    except Exception:
+                        pass
+                    time.sleep(0.033)
+
+                proc.terminate()
+                break  # salir del loop de intentos si el proceso corrió OK
+
+            except Exception as e:
+                print(f"⚠️  Error cámara USB brazo (intento {attempt+1}): {e}")
+
+        print("⚠️  Cámara USB brazo: reintentando en 5s...")
+        time.sleep(5)
+
+
+# =============================================================================
+# CEREBRO AUTÓNOMO
 # =============================================================================
 
 def autonomous_brain_thread():
@@ -633,8 +831,6 @@ def telemetry():
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 # ── SSE: telemetría Pico (encoders + odometría + modo) ───────────────────────
-# Mantiene el formato de /arm_telemetry para compatibilidad con el frontend.
-# El campo "arm" se reutiliza para los encoders.
 
 def _generate_pico_telemetry():
     while True:
@@ -667,27 +863,17 @@ def arm_telemetry():
     return Response(_generate_pico_telemetry(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
-# ── Video FPV ─────────────────────────────────────────────────────────────────
+# ── Video FPV CSI ─────────────────────────────────────────────────────────────
 
 def _generate_frames():
-    """MJPEG multipart stream."""
-    # Frame de "sin señal" en blanco mientras no hay cámara
-    no_signal = None
-    if CV2_AVAILABLE:
-        img = np.zeros((240, 320, 3), dtype=np.uint8)
-        cv2.putText(img, "NO SIGNAL", (60, 130), cv2.FONT_HERSHEY_SIMPLEX,
-                    1.2, (0, 200, 0), 2)
-        _, enc = cv2.imencode('.jpg', img)
-        no_signal = enc.tobytes()
-
+    """MJPEG multipart stream — cámara CSI principal."""
     while True:
         with _frame_lock:
             frame = current_frame
 
-        data = frame if frame else no_signal
-        if data:
+        if frame:
             yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + data + b'\r\n')
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
         time.sleep(0.033)
 
 @app.route('/video_feed')
@@ -697,14 +883,27 @@ def video_feed():
 
 @app.route('/camera_csi')
 def camera_csi():
-    """Alias — misma cámara FPV."""
+    """Alias — misma cámara FPV CSI."""
     return Response(_generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
+# ── Video USB Brazo ───────────────────────────────────────────────────────────
+
+def _generate_frames_usb():
+    """MJPEG multipart stream — cámara USB del brazo mecánico."""
+    while True:
+        with _frame_usb_lock:
+            frame = current_frame_usb
+
+        if frame:
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        time.sleep(0.033)
+
 @app.route('/camera_usb')
 def camera_usb():
-    """Placeholder — segunda cámara si se agrega."""
-    return Response(_generate_frames(),
+    """Cámara USB del brazo mecánico."""
+    return Response(_generate_frames_usb(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 # ── POST /command — recibe comandos del frontend (teclado, gamepad) ───────────
@@ -779,13 +978,17 @@ def status():
     with _mode_lock:
         m = rover_mode
         es = estop_active
+    import os as _os
+    arm_cam_present = _os.path.exists(f"/dev/video{CAMERA_ARM_USB_INDEX}")
     return jsonify({
-        "pico_connected": pc,
-        "i2c_available":  I2C_AVAILABLE,
-        "gpio_available": GPIO_AVAILABLE,
-        "cv2_available":  CV2_AVAILABLE,
-        "rover_mode":     m,
-        "estop":          es,
+        "pico_connected":    pc,
+        "i2c_available":     I2C_AVAILABLE,
+        "gpio_available":    GPIO_AVAILABLE,
+        "cv2_available":     CV2_AVAILABLE,
+        "rover_mode":        m,
+        "estop":             es,
+        "arm_cam_device":    f"/dev/video{CAMERA_ARM_USB_INDEX}",
+        "arm_cam_present":   arm_cam_present,
     })
 
 # =============================================================================
@@ -797,12 +1000,26 @@ if __name__ == '__main__':
     print("  ROVSSA Jetson Server — Modo Hardware")
     print("=" * 60)
 
+    # Inicializar BNO085 en el hilo principal antes de arrancar todo
+    _bno_instance = None
+    try:
+        import board, busio
+        from adafruit_bno08x.i2c import BNO08X_I2C
+        from adafruit_bno08x import BNO_REPORT_ROTATION_VECTOR as _BNO_RV
+        _i2c = busio.I2C(board.SCL, board.SDA)
+        _bno_instance = BNO08X_I2C(_i2c, address=BNO085_ADDR)
+        _bno_instance.enable_feature(_BNO_RV)
+        print("✅ BNO085 pre-inicializado")
+    except Exception as e:
+        print(f"⚠️  BNO085 no disponible: {e}")
+
     threads = [
-        threading.Thread(target=serial_reader_thread,  daemon=True, name="SerialRx"),
-        threading.Thread(target=serial_writer_thread,  daemon=True, name="SerialTx"),
-        threading.Thread(target=imu_thread,            daemon=True, name="IMU"),
-        threading.Thread(target=ultrasonic_thread,     daemon=True, name="Ultrasonic"),
-        threading.Thread(target=video_capture_thread,  daemon=True, name="Video"),
+        threading.Thread(target=serial_reader_thread,    daemon=True, name="SerialRx"),
+        threading.Thread(target=serial_writer_thread,    daemon=True, name="SerialTx"),
+        threading.Thread(target=lambda: imu_thread(_bno_instance), daemon=True, name="IMU"),
+        threading.Thread(target=ultrasonic_thread,       daemon=True, name="Ultrasonic"),
+        threading.Thread(target=video_capture_thread,    daemon=True, name="Video-CSI"),
+        threading.Thread(target=video_capture_usb_thread, daemon=True, name="Video-USB"),  # ← NUEVO
         threading.Thread(target=autonomous_brain_thread, daemon=True, name="Brain"),
     ]
 
@@ -813,6 +1030,8 @@ if __name__ == '__main__':
     print("🚀 Servidor ROVSSA en línea — http://0.0.0.0:8000")
     print("   Conectar frontend a http://<IP_JETSON>:8000")
     print("   Ver estado: http://<IP_JETSON>:8000/status")
+    print(f"   Cámara CSI:  http://<IP_JETSON>:8000/camera_csi")
+    print(f"   Cámara brazo USB: http://<IP_JETSON>:8000/camera_usb  (/dev/video{CAMERA_ARM_USB_INDEX})")
     print("=" * 60)
 
     app.run(host='0.0.0.0', port=8000, threaded=True, use_reloader=False)

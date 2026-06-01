@@ -56,13 +56,16 @@ function App() {
     ch: [1500, 1500, 1500, 1500, 1500, 1500],
   });
 
-  const [isConnected, setIsConnected]     = useState(false);
+  const [isConnected, setIsConnected]         = useState(false);
   const [isPicoConnected, setIsPicoConnected] = useState(false);
-  const [roverMode, setRoverMode]         = useState<RoverMode>('MANUAL');
-  const [isEStopActive, setIsEStopActive] = useState(false);
+  const [roverMode, setRoverMode]             = useState<RoverMode>('MANUAL');
+  const [isEStopActive, setIsEStopActive]     = useState(false);
+
+  // Estado de la cámara USB del brazo
+  const [armCamError, setArmCamError] = useState(false);
 
   // Keys actualmente presionadas para control de teclado
-  const keysRef = useRef<Set<string>>(new Set());
+  const keysRef      = useRef<Set<string>>(new Set());
   const driveLoopRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [activeKeys, setActiveKeys] = useState<Set<string>>(new Set());
 
@@ -127,6 +130,11 @@ function App() {
     return () => { es?.close(); clearTimeout(retryTimer); };
   }, [jetsonIP]);
 
+  // Resetear error de cámara brazo cuando cambia la IP
+  useEffect(() => {
+    setArmCamError(false);
+  }, [jetsonIP]);
+
   // ── Enviar comando HTTP al servidor ─────────────────────────────────────
   const sendCommand = useCallback(async (cmd: object) => {
     try {
@@ -154,7 +162,6 @@ function App() {
   }, [sendCommand, addLog]);
 
   // ── Control por teclado ──────────────────────────────────────────────────
-  // WASD / flechas: drive; Espacio: stop; R: reset odom
   const computeDriveFromKeys = useCallback(() => {
     const keys = keysRef.current;
     let vx = 0, omega = 0;
@@ -167,7 +174,6 @@ function App() {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      // No interceptar cuando el usuario escribe en un input
       if (e.target instanceof HTMLInputElement) return;
 
       const key = e.key;
@@ -198,7 +204,6 @@ function App() {
     const onKeyUp = (e: KeyboardEvent) => {
       keysRef.current.delete(e.key);
       setActiveKeys(new Set(keysRef.current));
-      // Si no queda ninguna tecla de movimiento, detener
       const movKeys = ['w','a','s','d','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
       if (!movKeys.some(k => keysRef.current.has(k))) {
         if (roverMode === 'MANUAL' && !isEStopActive) {
@@ -238,8 +243,8 @@ function App() {
 
   // ── Helpers visuales ────────────────────────────────────────────────────
   const distFrontal = telemetry?.distancia_frontal ?? 5.0;
-  const distPct = Math.min((distFrontal / 5.0) * 100, 100);
-  const distColor = distFrontal < 0.5 ? 'bg-red-500' : distFrontal < 1.5 ? 'bg-yellow-400' : 'bg-green-500';
+  const distPct     = Math.min((distFrontal / 5.0) * 100, 100);
+  const distColor   = distFrontal < 0.5 ? 'bg-red-500' : distFrontal < 1.5 ? 'bg-yellow-400' : 'bg-green-500';
 
   const encFL = picoTelemetry.arm?.enc_FL ?? 0;
   const encFR = picoTelemetry.arm?.enc_FR ?? 0;
@@ -333,12 +338,16 @@ function App() {
       </header>
 
       {/* ── MAIN GRID ───────────────────────────────────────────────── */}
+      {/*
+          Layout: [CAM CSI 5col] [CAM USB brazo 3col] [SIDEBAR 4col]
+          Total = 12 columnas, igual que antes.
+      */}
       <main className="grid grid-cols-12 gap-4 h-[52vh] mb-4">
 
-        {/* VIDEO FPV */}
-        <section className="col-span-8 bg-black rounded-lg border border-slate-800 overflow-hidden relative flex flex-col">
+        {/* VIDEO FPV — CÁMARA CSI PRINCIPAL (sin tocar) */}
+        <section className="col-span-5 bg-black rounded-lg border border-slate-800 overflow-hidden relative flex flex-col">
           <div className="absolute top-4 left-4 z-10 bg-black/60 px-2 py-1 rounded text-[10px] text-green-500 border border-green-900 uppercase tracking-widest backdrop-blur-sm">
-            Cam-01 / FPV Principal
+            Cam-01 / FPV Principal · CSI
           </div>
           {isEStopActive && (
             <div className="absolute inset-0 z-20 bg-red-900/40 flex items-center justify-center">
@@ -355,7 +364,48 @@ function App() {
           />
         </section>
 
-        {/* SIDEBAR */}
+        {/* VIDEO BRAZO — CÁMARA USB (nueva) */}
+        <section className="col-span-3 bg-black rounded-lg border border-slate-800 overflow-hidden relative flex flex-col">
+          <div className="absolute top-4 left-4 z-10 bg-black/60 px-2 py-1 rounded text-[10px] text-cyan-400 border border-cyan-900 uppercase tracking-widest backdrop-blur-sm">
+            Cam-02 / Brazo · USB
+          </div>
+
+          {/* Overlay E-STOP */}
+          {isEStopActive && (
+            <div className="absolute inset-0 z-20 bg-red-900/40 flex items-center justify-center">
+              <span className="text-red-400 font-black text-lg tracking-widest animate-pulse">
+                ⛔ E-STOP
+              </span>
+            </div>
+          )}
+
+          {/* Imagen del brazo — si falla muestra placeholder */}
+          {!armCamError ? (
+            <img
+              src={`http://${jetsonIP}:8000/camera_usb`}
+              alt="Cámara Brazo USB"
+              className={`w-full h-full object-cover ${isEStopActive ? 'grayscale' : ''}`}
+              onError={() => setArmCamError(true)}
+            />
+          ) : (
+            /* Placeholder cuando la cámara USB no está disponible */
+            <div className="flex-1 flex flex-col items-center justify-center gap-3 text-slate-600">
+              <svg className="w-10 h-10 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                  d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9a2.25 2.25 0 00-2.25-2.25h-9A2.25 2.25 0 002.25 7.5v9a2.25 2.25 0 002.25 2.25z" />
+              </svg>
+              <span className="text-[10px] uppercase tracking-widest opacity-50">Sin señal</span>
+              <span className="text-[9px] text-slate-700">/dev/video1</span>
+              <button
+                onClick={() => setArmCamError(false)}
+                className="text-[9px] text-cyan-700 hover:text-cyan-500 border border-cyan-900 hover:border-cyan-700 px-2 py-1 rounded transition-colors uppercase tracking-wider mt-1">
+                Reintentar
+              </button>
+            </div>
+          )}
+        </section>
+
+        {/* SIDEBAR — idéntico al original */}
         <aside className="col-span-4 flex flex-col gap-3">
 
           {/* Control de Operaciones */}
