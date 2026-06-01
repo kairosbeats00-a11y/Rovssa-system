@@ -1,73 +1,119 @@
-# React + TypeScript + Vite
+# ROVSSA — Mission Control
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Sistema de control terrestre (GCS) para el rover ROVSSA. Interfaz web React que se comunica con un servidor Flask corriendo en la Jetson Nano del rover.
 
-Currently, two official plugins are available:
+---
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Instalación y puesta en marcha
 
-## React Compiler
+### Requisitos previos
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- Node.js 18+ (para el frontend)
+- Python 3.8+ (para el servidor Jetson)
+- La laptop y la Jetson deben estar en la **misma red local**
 
-## Expanding the ESLint configuration
+---
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+### 1. Frontend (laptop)
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+```bash
+# Clonar el repositorio
+git clone https://github.com/kairosbeats00-a11y/Rovssa-vercel.git
+cd Rovssa-vercel
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+# Instalar dependencias
+npm install
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+# Iniciar servidor de desarrollo
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Abrir el navegador en `http://localhost:5173`.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+Para un build de producción (deploy en Vercel u otro hosting):
+```bash
+npm run build
 ```
+
+---
+
+### 2. Servidor Jetson Nano
+
+Conectarse a la Jetson por SSH y ejecutar los siguientes pasos.
+
+**Instalar dependencias Python:**
+```bash
+sudo pip3 install flask pyserial smbus2 numpy adafruit-circuitpython-bno08x
+sudo apt install python3-opencv gstreamer1.0-tools gstreamer1.0-plugins-good -y
+
+# Permisos para el puerto serial del Pico
+sudo usermod -a -G dialout $USER
+# (cerrar sesión y volver a entrar, o ejecutar:)
+sudo chmod 666 /dev/ttyACM0
+```
+
+**Clonar el repo en la Jetson (si no está):**
+```bash
+git clone https://github.com/kairosbeats00-a11y/Rovssa-vercel.git
+cd Rovssa-vercel
+```
+
+**Iniciar el servidor:**
+```bash
+python3 "entorno de simulacion/jetson_server.py"
+```
+
+El servidor queda escuchando en `http://0.0.0.0:8000`.
+
+---
+
+### 3. Conectar el frontend al rover
+
+1. Abrir la app en el navegador.
+2. Hacer click en el ícono ⚙ (esquina superior derecha).
+3. Ingresar la IP de la Jetson (ej: `192.168.1.100`) y guardar.
+
+La IP también se puede fijar en tiempo de build con la variable de entorno:
+```bash
+VITE_JETSON_IP=192.168.1.100 npm run build
+```
+
+---
+
+### 4. Verificar la conexión
+
+Con el servidor corriendo, acceder desde cualquier navegador en la red:
+```
+http://<IP_JETSON>:8000/status
+```
+
+Debe devolver un JSON con el estado del hardware (Pico, GPIO, GPS, etc.).
+
+---
+
+### Conexiones de hardware (referencia rápida)
+
+| Componente | Conexión |
+|---|---|
+| Pico RP2040 | USB-A → micro-USB → `/dev/ttyACM0` |
+| IMU BNO085 | I2C addr `0x4B` — SDA pin 3, SCL pin 5 |
+| HC-SR04 Frontal | TRIG GPIO17 (pin 11), ECHO GPIO27 (pin 13) |
+| HC-SR04 Izquierda | TRIG GPIO22 (pin 15), ECHO GPIO23 (pin 16) |
+| HC-SR04 Derecha | TRIG GPIO24 (pin 18), ECHO GPIO10 (pin 19) |
+| Cámara FPV | CSI ribbon → conector CSI Jetson |
+| Cámara Brazo | USB → `/dev/video1` |
+| GPS NEO-M8N | USB/Serial |
+
+---
+
+## Controles de teclado (modo MANUAL)
+
+| Tecla | Acción |
+|---|---|
+| `W` / `↑` | Avanzar |
+| `S` / `↓` | Retroceder |
+| `A` / `←` | Girar izquierda |
+| `D` / `→` | Girar derecha |
+| `Espacio` | Stop |
+| `E` | Emergency Stop (toggle) |
+| `R` | Reset odometría |
