@@ -179,11 +179,19 @@ def _action_search_and_pick(params: dict, hw) -> bool:
     BBOX_CENTER_X = 320    # centro horizontal de la imagen (640px)
     BBOX_TARGET_AREA = 18000  # área del bbox cuando estamos cerca (~pick distance)
 
+    search_start = time.time()
+    SEARCH_TIMEOUT = 60.0  # segundos máximos buscando
+
     while picked < count:
         with _mission_lock:
             if _mission_state["stop_requested"]:
                 hw.send_drive(0, 0)
                 return False
+
+        if time.time() - search_start > SEARCH_TIMEOUT:
+            _log(f"⏰ SEARCH timeout — encontrados {picked}/{count}")
+            hw.send_drive(0, 0)
+            return picked > 0  # éxito parcial si recogió algo
 
         detection = hw.get_yolo_detection(target_class)
 
@@ -209,6 +217,7 @@ def _action_search_and_pick(params: dict, hw) -> bool:
             if success:
                 picked += 1
                 _log(f"✅ Objeto {picked}/{count} recolectado")
+                search_start = time.time()  # resetear timer para el siguiente
             else:
                 _log("⚠️  Pick falló — reintentando búsqueda")
             time.sleep(0.5)

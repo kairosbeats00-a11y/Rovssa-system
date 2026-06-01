@@ -13,8 +13,8 @@ import time
 
 def yolo_detector_thread(frame_lock, get_current_frame,
                          yolo_lock, yolo_detections_dict,
-                         target_classes=("bottle",),
-                         conf_threshold=0.45):
+                         target_classes=("bottle", "sports ball", "cup"),
+                         conf_threshold=0.40):
     """
     Hilo de inferencia YOLO.
     

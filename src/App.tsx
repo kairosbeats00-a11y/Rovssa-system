@@ -97,7 +97,9 @@ function App() {
   const [zones, setZones]                   = useState<GpsZone[]>([]);
   const [missionStatus, setMissionStatus]   = useState<MissionStatus | null>(null);
   const [isPlanning, setIsPlanning]         = useState(false);
-  const [aiApiKey]                          = useState('XXXXXXXXXXXXXXXXXXXXXXXX');
+  const [aiApiKey]                          = useState<string>(
+    (import.meta as any).env?.VITE_DEEPSEEK_API_KEY ?? ''
+  );
   const missionPollRef                      = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Keys actualmente presionadas para control de teclado
@@ -214,6 +216,7 @@ function App() {
 
       const key = e.key;
       if (['w','a','s','d','ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(key)) {
+        if (e.target instanceof HTMLTextAreaElement) return;
         e.preventDefault();
       }
 
@@ -314,6 +317,10 @@ function App() {
     if (!missionPrompt.trim()) return;
     if (zones.length === 0) {
       addLog('⚠️  Marcá al menos una zona GPS antes de lanzar');
+      return;
+    }
+    if (!aiApiKey) {
+      addLog('❌ API key no configurada — agregá VITE_DEEPSEEK_API_KEY en .env');
       return;
     }
 
@@ -707,6 +714,25 @@ Reglas:
               🧠 Misión Autónoma
             </h3>
 
+{!aiApiKey && (
+              <div className="text-[9px] text-red-400 bg-red-950/40 border border-red-900/50 rounded px-2 py-1.5">
+                ⚠️ VITE_DEEPSEEK_API_KEY no configurada — agregá la key en .env y rebuildeá
+              </div>
+            )}
+
+            {/* Prompts rápidos */}
+            <div className="flex flex-wrap gap-1">
+              {[
+                { label: '4 botellas A→B', prompt: 'Navegá a zona A, buscá 4 botellas y recogelas una por una. Después navegá a zona B y descargá todo.' },
+                { label: '2 botellas A→B', prompt: 'Navegá a zona A, buscá 2 botellas y recogelas. Después navegá a zona B y descargá.' },
+                { label: 'Solo descargar', prompt: 'Navegá a zona B y descargá el contenido del compartimento.' },
+              ].map(({ label, prompt }) => (
+                <button key={label} onClick={() => setMissionPrompt(prompt)}
+                  className="text-[9px] px-2 py-1 rounded border border-purple-900/50 text-purple-500 hover:text-purple-300 hover:border-purple-700 bg-slate-950 transition-colors uppercase tracking-wider">
+                  {label}
+                </button>
+              ))}
+            </div>
             <textarea
               value={missionPrompt}
               onChange={e => setMissionPrompt(e.target.value)}

@@ -673,31 +673,6 @@ def video_capture_usb_thread():
             print(f"⚠️  Error cámara USB brazo: {e}")
             time.sleep(5)
 
-    import os as _os
-
-    device = f"/dev/video{CAMERA_ARM_USB_INDEX}"
-
-    if not GST_AVAILABLE:
-        print(f"⚠️  GStreamer no disponible — cámara USB brazo ({device}) deshabilitada")
-        return
-
-    # Pipeline v4l2src → JPEG → multifilesink (archivo temporal)
-    CMD = [
-        'gst-launch-1.0',
-        'v4l2src', f'device={device}', '!',
-        'image/jpeg,width=320,height=240,framerate=15/1', '!',
-        'multifilesink', f'location={JPEG_TMP_USB}'
-    ]
-
-    # Pipeline de respaldo si la cámara no entrega JPEG nativo
-    CMD_FALLBACK = [
-        'gst-launch-1.0',
-        'v4l2src', f'device={device}', '!',
-        'videoconvert', '!',
-        'video/x-raw,format=I420,width=640,height=480', '!',
-        'jpegenc', 'quality=70', '!',
-        'multifilesink', f'location={JPEG_TMP_USB}'
-    ]
 
     while True:
         # Verificar que el dispositivo existe antes de abrir GStreamer
@@ -1070,12 +1045,12 @@ if __name__ == '__main__':
         print(f"⚠️  BNO085 no disponible: {e}")
 
     # Crear interfaz de hardware para el executor autónomo
-    _hw_interface = HardwareInterface(
+   _hw_interface = HardwareInterface(
         send_to_pico_fn   = send_to_pico,
         telem_lock        = _telem_lock,
         telemetry_dict    = current_telemetry,
         imu_lock          = _imu_lock,
-        imu_refs          = {"pitch": 0.0, "roll": 0.0, "yaw": 0.0},
+        imu_refs          = current_telemetry,
         gps_lock          = _gps_lock,
         gps_dict          = gps_state,
         yolo_lock         = _yolo_lock,
@@ -1083,25 +1058,27 @@ if __name__ == '__main__':
     )
 
     threads = [
-        threading.Thread(target=serial_reader_thread,    daemon=True, name="SerialRx"),
-        threading.Thread(target=serial_writer_thread,    daemon=True, name="SerialTx"),
+        threading.Thread(target=serial_reader_thread,     daemon=True, name="SerialRx"),
+        threading.Thread(target=serial_writer_thread,     daemon=True, name="SerialTx"),
         threading.Thread(target=lambda: imu_thread(_bno_instance), daemon=True, name="IMU"),
-        threading.Thread(target=ultrasonic_thread,       daemon=True, name="Ultrasonic"),
-        threading.Thread(target=video_capture_thread,    daemon=True, name="Video-CSI"),
+        threading.Thread(target=ultrasonic_thread,        daemon=True, name="Ultrasonic"),
+        threading.Thread(target=video_capture_thread,     daemon=True, name="Video-CSI"),
         threading.Thread(target=video_capture_usb_thread, daemon=True, name="Video-USB"),
-        threading.Thread(target=autonomous_brain_thread, daemon=True, name="Brain"),
-       threading.Thread(target=lambda: executor_loop(_hw_interface), daemon=True, name="Executor"),
+        threading.Thread(target=autonomous_brain_thread,  daemon=True, name="Brain"),
+        threading.Thread(target=lambda: executor_loop(_hw_interface), daemon=True, name="Executor"),
         threading.Thread(
             target=lambda: gps_reader_thread(
-                gps_lock = _gps_lock,
-                gps_dict = gps_state,
+                gps_lock=_gps_lock,
+                gps_dict=gps_state,
             ),
             daemon=True, name="GPS"
         ),
-                frame_lock        = _frame_lock,
-                get_current_frame = lambda: current_frame,
-                yolo_lock         = _yolo_lock,
-                yolo_detections_dict = yolo_detections,
+        threading.Thread(
+            target=lambda: yolo_detector_thread(
+                frame_lock=_frame_lock,
+                get_current_frame=lambda: current_frame,
+                yolo_lock=_yolo_lock,
+                yolo_detections_dict=yolo_detections,
             ),
             daemon=True, name="YOLO"
         ),
