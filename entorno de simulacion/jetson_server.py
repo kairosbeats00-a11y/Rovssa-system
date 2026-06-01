@@ -1045,7 +1045,7 @@ if __name__ == '__main__':
         print(f"⚠️  BNO085 no disponible: {e}")
 
     # Crear interfaz de hardware para el executor autónomo
-   _hw_interface = HardwareInterface(
+    _hw_interface = HardwareInterface(
         send_to_pico_fn   = send_to_pico,
         telem_lock        = _telem_lock,
         telemetry_dict    = current_telemetry,
