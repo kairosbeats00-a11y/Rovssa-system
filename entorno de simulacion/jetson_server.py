@@ -1002,6 +1002,11 @@ def mission_status():
 
 # ── GET /status — resumen general del sistema ─────────────────────────────────
 
+@app.route('/yolo_status')
+def yolo_status():
+    with _yolo_lock:
+        return jsonify({"detections": dict(yolo_detections)})
+
 @app.route('/status')
 def status():
     with _pico_lock:

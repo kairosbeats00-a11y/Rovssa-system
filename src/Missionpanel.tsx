@@ -84,13 +84,13 @@ function blocksToObjectives(blocks: Block[]) {
       case 'IR_A_GPS':
         return { action: 'NAVIGATE_TO', params: { lat: b.params.lat, lon: b.params.lon, tolerance_m: b.params.tolerance_m } };
       case 'AVANZAR':
-        return { action: 'AVANZAR', params: { metros: b.params.metros } };
+        return { action: 'NAVIGATE_FORWARD', params: { metros: b.params.metros } };
       case 'GIRAR_DER':
-        return { action: 'GIRAR', params: { grados: b.params.grados, direccion: 'derecha' } };
+        return { action: 'TURN', params: { grados: b.params.grados, dir: 'right' } };
       case 'GIRAR_IZQ':
-        return { action: 'GIRAR', params: { grados: b.params.grados, direccion: 'izquierda' } };
+        return { action: 'TURN', params: { grados: b.params.grados, dir: 'left' } };
       case 'BUSCAR_Y_RECOLECTAR':
-        return { action: 'SEARCH_AND_COLLECT', params: { count: b.params.count, target_class: b.params.target_class, timeout_s: b.params.timeout_s, search_radius_m: b.params.search_radius_m, explore_speed: b.params.explore_speed } };
+        return { action: 'SEARCH_AND_PICK', params: { count: b.params.count, target_class: b.params.target_class } };
       case 'DESCARGAR':
         return { action: 'DISCHARGE', params: { modo: b.params.modo, lat: b.params.lat, lon: b.params.lon, tolerance_m: b.params.tolerance_m, descripcion: b.params.descripcion } };
       case 'DETENER':
@@ -587,6 +587,12 @@ export default function MissionPanel({ jetsonIP, telemetryGps, addLog }: Props) 
 
   const startMission = useCallback(async () => {
     if (blocks.length === 0) { addLog('⚠️  Agregá al menos un bloque'); return; }
+    if (isRunning) {
+      await fetch(`http://${jetsonIP}:8000/mission/stop`, { method: 'POST' });
+      await new Promise(r => setTimeout(r, 600));
+      if (pollRef.current) clearInterval(pollRef.current);
+      setIsRunning(false);
+    }
     const objectives = blocksToObjectives(blocks);
     try {
       const res = await fetch(`http://${jetsonIP}:8000/mission`, {

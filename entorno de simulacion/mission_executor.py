@@ -265,12 +265,57 @@ def _action_stop(params: dict, hw) -> bool:
 
 # Mapa de acciones disponibles
 _ACTION_MAP = {
-    "NAVIGATE_TO":      _action_navigate_to,
-    "SEARCH_AND_PICK":  _action_search_and_pick,
-    "DISCHARGE":        _action_discharge,
-    "WAIT":             _action_wait,
-    "STOP":             _action_stop,
+    "NAVIGATE_TO":       _action_navigate_to,
+    "SEARCH_AND_PICK":   _action_search_and_pick,
+    "NAVIGATE_FORWARD":  _action_navigate_forward,
+    "TURN":              _action_turn,
+    "DISCHARGE":         _action_discharge,
+    "WAIT":              _action_wait,
+    "STOP":              _action_stop,
 }
+
+def _action_navigate_forward(params: dict, hw) -> bool:
+    """Avanza N metros usando tiempo estimado."""
+    metros = float(params.get("metros", 1.0))
+    vx = 0.5
+    # ajustar el divisor según velocidad real del rover
+    duration = metros / 0.15
+    _log(f"NAVIGATE_FORWARD → {metros}m (~{duration:.1f}s)")
+    deadline = time.time() + duration
+    while time.time() < deadline:
+        with _mission_lock:
+            if _mission_state["stop_requested"]:
+                hw.send_drive(0, 0)
+                return False
+        obs = hw.get_obstacle_front()
+        if obs < 0.40:
+            _log(f"⚠️  Obstáculo a {obs:.2f}m — abortando NAVIGATE_FORWARD")
+            hw.send_drive(0, 0)
+            return False
+        hw.send_drive(vx, 0)
+        time.sleep(0.1)
+    hw.send_drive(0, 0)
+    return True
+
+
+def _action_turn(params: dict, hw) -> bool:
+    """Gira N grados en el lugar."""
+    grados = float(params.get("grados", 90))
+    direccion = params.get("dir", "right")
+    omega = 0.6 if direccion == "right" else -0.6
+    # ajustar 1.8 según tu rover real (segundos para 90°)
+    duration = (grados / 90.0) * 1.8
+    _log(f"TURN → {grados}° {direccion} (~{duration:.1f}s)")
+    deadline = time.time() + duration
+    while time.time() < deadline:
+        with _mission_lock:
+            if _mission_state["stop_requested"]:
+                hw.send_drive(0, 0)
+                return False
+        hw.send_drive(0, omega)
+        time.sleep(0.1)
+    hw.send_drive(0, 0)
+    return True
 
 # ── Loop principal del executor ───────────────────────────────────────────────
 
