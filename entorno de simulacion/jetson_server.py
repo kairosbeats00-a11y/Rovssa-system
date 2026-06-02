@@ -147,7 +147,7 @@ app = Flask(__name__)
 # =============================================================================
 
 # Puerto serial del Pico (USB CDC)
-PICO_PORTS = ["/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyUSB0", "/dev/ttyUSB1"]
+PICO_PORTS = ["/dev/ttyACM1", "/dev/ttyACM2", "/dev/ttyUSB0", "/dev/ttyUSB1"]
 PICO_BAUD  = 115200
 
 # I2C — MPU6050
@@ -826,6 +826,8 @@ def autonomous_brain_thread():
 # HILO: TELEOPERACIÓN BRAZO SO101 VÍA ZMQ
 # =============================================================================
 
+_robot_lock = threading.Lock()
+
 def zmq_arm_thread(robot):
     """PULL 5555 — recibe comandos {"arm": {...}} del Mac
        PUSH 5556 — envía observaciones {"arm": {...}} al Mac"""
@@ -853,10 +855,11 @@ def zmq_arm_thread(robot):
             msg = cmd_socket.recv_string(_zmq.NOBLOCK)
             arm_cmd = json.loads(msg).get("arm")
             if arm_cmd:
-                try:
-                    robot.send_action(arm_cmd)
-                except Exception as e:
-                    print(f"⚠️  Error enviando acción al brazo: {e}")
+                with _robot_lock:
+                    try:
+                        robot.send_action(arm_cmd)
+                    except Exception as e:
+                        print(f"⚠️  Error enviando acción al brazo: {e}")
         except _zmq.Again:
             pass
         except Exception as e:
@@ -864,7 +867,8 @@ def zmq_arm_thread(robot):
 
         # Leer observación y publicar
         try:
-            obs_raw = robot.get_observation()
+            with _robot_lock:
+                obs_raw = robot.get_observation()
             obs = {k: float(v) for k, v in obs_raw.items() if not hasattr(v, "shape")}
             obs_socket.send_string(json.dumps({"arm": obs}), _zmq.NOBLOCK)
         except _zmq.Again:
