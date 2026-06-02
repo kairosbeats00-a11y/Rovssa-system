@@ -55,6 +55,23 @@ import queue
 import sys
 import os
 
+# ── ZMQ + SO101 (con fallbacks seguros) ──────────────────────────────────────
+
+try:
+    import zmq as _zmq
+    ZMQ_AVAILABLE = True
+except ImportError:
+    ZMQ_AVAILABLE = False
+    print("⚠️  pyzmq no instalado — teleoperación ZMQ deshabilitada")
+
+try:
+    from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
+    from lerobot.robots.so_follower.so_follower import SOFollower
+    LEROBOT_AVAILABLE = True
+except ImportError:
+    LEROBOT_AVAILABLE = False
+    print("⚠️  lerobot no instalado — brazo SO101 deshabilitado")
+
 # ── Importaciones de hardware (con fallbacks seguros) ─────────────────────────
 
 try:
@@ -165,6 +182,11 @@ DIST_PER_TICK     = WHEEL_CIRCUMFERENCE / ENCODER_CPR
 
 # Umbral de obstáculo para cerebro autónomo (metros)
 OBSTACLE_DIST_M = 0.40    # frenar si hay algo a menos de 40 cm
+
+# SO101 / ZMQ
+SO101_PORT   = "/dev/ttyACM0"   # SO101 follower (Pico suele quedar en ACM1)
+ZMQ_CMD_PORT = 5555
+ZMQ_OBS_PORT = 5556
 
 # =============================================================================
 # ESTADO COMPARTIDO (protegido por locks)
@@ -801,6 +823,58 @@ def autonomous_brain_thread():
         time.sleep(0.05)
 
 # =============================================================================
+# HILO: TELEOPERACIÓN BRAZO SO101 VÍA ZMQ
+# =============================================================================
+
+def zmq_arm_thread(robot):
+    """PULL 5555 — recibe comandos {"arm": {...}} del Mac
+       PUSH 5556 — envía observaciones {"arm": {...}} al Mac"""
+    if not ZMQ_AVAILABLE or robot is None:
+        print("⚠️  ZMQ/SO101 no disponible — hilo teleoperación deshabilitado")
+        return
+
+    print(f"🦾 ZMQ arm thread iniciado (cmd={ZMQ_CMD_PORT}, obs={ZMQ_OBS_PORT})")
+    context = _zmq.Context()
+
+    cmd_socket = context.socket(_zmq.PULL)
+    cmd_socket.setsockopt(_zmq.CONFLATE, 1)
+    cmd_socket.setsockopt(_zmq.RCVTIMEO, 0)
+    cmd_socket.bind(f"tcp://*:{ZMQ_CMD_PORT}")
+
+    obs_socket = context.socket(_zmq.PUSH)
+    obs_socket.setsockopt(_zmq.CONFLATE, 1)
+    obs_socket.bind(f"tcp://*:{ZMQ_OBS_PORT}")
+
+    print("✅ ZMQ arm listo")
+
+    while True:
+        # Recibir y ejecutar comando
+        try:
+            msg = cmd_socket.recv_string(_zmq.NOBLOCK)
+            arm_cmd = json.loads(msg).get("arm")
+            if arm_cmd:
+                try:
+                    robot.send_action(arm_cmd)
+                except Exception as e:
+                    print(f"⚠️  Error enviando acción al brazo: {e}")
+        except _zmq.Again:
+            pass
+        except Exception as e:
+            print(f"⚠️  Error ZMQ recv: {e}")
+
+        # Leer observación y publicar
+        try:
+            obs_raw = robot.get_observation()
+            obs = {k: float(v) for k, v in obs_raw.items() if not hasattr(v, "shape")}
+            obs_socket.send_string(json.dumps({"arm": obs}), _zmq.NOBLOCK)
+        except _zmq.Again:
+            pass
+        except Exception as e:
+            print(f"⚠️  Error ZMQ obs: {e}")
+
+        time.sleep(0.033)   # ~30 Hz
+
+# =============================================================================
 # FLASK ENDPOINTS
 # =============================================================================
 
@@ -1057,6 +1131,18 @@ if __name__ == '__main__':
         yolo_detections   = yolo_detections,
     )
 
+    # Inicializar brazo SO101
+    _so101_robot = None
+    if LEROBOT_AVAILABLE:
+        try:
+            _so101_cfg = SOFollowerRobotConfig(port=SO101_PORT, id="my_awesome_follower_arm")
+            _so101_robot = SOFollower(_so101_cfg)
+            _so101_robot.connect()
+            print(f"✅ Brazo SO101 conectado en {SO101_PORT}")
+        except Exception as e:
+            print(f"⚠️  Brazo SO101 no disponible: {e}")
+            _so101_robot = None
+
     threads = [
         threading.Thread(target=serial_reader_thread,     daemon=True, name="SerialRx"),
         threading.Thread(target=serial_writer_thread,     daemon=True, name="SerialTx"),
@@ -1082,6 +1168,7 @@ if __name__ == '__main__':
             ),
             daemon=True, name="YOLO"
         ),
+        threading.Thread(target=lambda: zmq_arm_thread(_so101_robot), daemon=True, name="ZMQ-Arm"),
     ]
 
     for t in threads:
