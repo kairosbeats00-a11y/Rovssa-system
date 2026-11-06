@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Conectar a ROVSSA</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101816;color:#e5eeec;font:16px/1.5 system-ui;min-height:100vh;display:grid;place-items:center}
+main{width:min(420px,92vw);background:#19231e;border:1px solid #405047;border-radius:16px;padding:28px}
+h1{margin:0}p{color:#b4c5ba}input,button{font:inherit;width:100%;padding:10px;border:1px solid #506155;border-radius:7px}
+input{background:#101816;color:white;margin:6px 0 14px}button{background:#c4e976;cursor:pointer;color:#1a2614}
+</style><main><h1>ROVSSA</h1><p>Conectá la PC al router del rover y abrí la estación.</p>
+<form><label>IP o nombre de la Jetson<input required autofocus placeholder="192.168.1.100" id="host"></label><button>Conectar por HTTPS</button><output aria-live="polite"></output></form></main>
+<script>
+const host = document.querySelector('input');
+try {host.value = localStorage.getItem('rovssa.host') || ''} catch {}
+document.querySelector('form').onsubmit = event => {
+  event.preventDefault();
+  const input = host.value.trim();
+  try {
+    if (!/^(?:https:\/\/)?[a-zA-Z0-9.-]+(?::\d+)?\/?$/.test(input)) throw Error();
+    const url = new URL(input.startsWith('https://') ? input : 'https://' + input);
+    try {localStorage.setItem('rovssa.host',url.host)} catch {}
+    location.assign(url.origin);
+  } catch {document.querySelector('output').textContent = 'Revisá la dirección de la Jetson.'}
+};
+</script></html>

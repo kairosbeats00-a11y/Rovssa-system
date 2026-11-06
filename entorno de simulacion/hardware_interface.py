@@ -33,19 +33,10 @@ class HardwareInterface:
         self._send_to_pico({"cmd": "drive", "vx": round(vx, 3), "omega": round(omega, 3)})
 
     def arm_pick(self) -> bool:
-        """
-        Activa secuencia de pick del brazo.
-        Por ahora envía comando al Pico — adaptar a tu firmware de brazo.
-        """
-        self._send_to_pico({"cmd": "arm_pick"})
-        time.sleep(2.0)   # tiempo estimado de la secuencia
-        return True       # TODO: leer ACK del Pico cuando esté implementado
+        raise RuntimeError("Arm disabled: no verified acknowledgement or safety interlock")
 
     def arm_discharge(self) -> bool:
-        """Activa mecanismo de descarga."""
-        self._send_to_pico({"cmd": "arm_discharge"})
-        time.sleep(2.0)
-        return True
+        raise RuntimeError("Arm disabled: no verified acknowledgement or safety interlock")
 
     # ── Sensores ──────────────────────────────────────────────────────────────
 
@@ -58,7 +49,7 @@ class HardwareInterface:
     def get_obstacle_front(self) -> float:
         """Retorna distancia frontal en metros."""
         with self._telem_lock:
-            return self._telemetry.get("distancia_frontal", 5.0)
+            return self._telemetry.get("distancia_frontal", 0.0)
 
     def get_gps(self):
         """
@@ -68,7 +59,7 @@ class HardwareInterface:
         if self._gps_lock is None or self._gps is None:
             return None
         with self._gps_lock:
-            if not self._gps.get("fix", False):
+            if not self._gps.get("fix", False) or time.monotonic() - self._gps.get("updated_at", 0) > 3:
                 return None
             return {"lat": self._gps["lat"], "lon": self._gps["lon"]}
 

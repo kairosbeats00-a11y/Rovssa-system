@@ -19,14 +19,14 @@ interface RoverMapProps {
 }
 
 // Ícono del rover como flecha SVG rotada según yaw
-function makeRoverIcon(yaw: number, fix: boolean) {
+function makeRoverIcon(yaw: number | undefined, fix: boolean) {
   const color = fix ? '#4ade80' : '#f87171';
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
-      <g transform="rotate(${yaw}, 16, 16)">
-        <polygon points="16,4 22,24 16,20 10,24" fill="${color}" stroke="#000" stroke-width="1.5"/>
+      <g transform="rotate(${yaw ?? 0}, 16, 16)">
+        <polygon opacity="${yaw === undefined ? 0 : 1}" points="16,4 22,24 16,20 10,24" fill="${color}" stroke="#000" stroke-width="1.5"/>
       </g>
-      <circle cx="16" cy="16" r="3" fill="${color}" stroke="#000" stroke-width="1"/>
+      <circle cx="16" cy="16" r="${yaw === undefined ? 6 : 3}" fill="${color}" stroke="#000" stroke-width="1"/>
     </svg>`;
   return L.divIcon({
     html: svg,
@@ -36,12 +36,14 @@ function makeRoverIcon(yaw: number, fix: boolean) {
   });
 }
 
-export default function RoverMap({ lat, lon, yaw = 0, fix = false, sats = 0 }: RoverMapProps) {
+export default function RoverMap({ lat, lon, yaw, fix = false, sats = 0 }: RoverMapProps) {
   const mapRef      = useRef<L.Map | null>(null);
   const markerRef   = useRef<L.Marker | null>(null);
   const trailRef    = useRef<L.Polyline | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const trailPoints = useRef<[number, number][]>([]);
+  const hasFix = useRef(false);
+  const [tileError,setTileError] = useState(false);
   const [following, setFollowing] = useState(true);
   const [trailLen, setTrailLen]   = useState(0);
 
@@ -50,21 +52,22 @@ export default function RoverMap({ lat, lon, yaw = 0, fix = false, sats = 0 }: R
     if (!containerRef.current || mapRef.current) return;
 
     const map = L.map(containerRef.current, {
-      center: [lat || -24.7859, lon || -65.4117],
-      zoom: 18,
+      center: fix ? [lat, lon] : [0, 0],
+      zoom: fix ? 18 : 1,
       zoomControl: true,
-      attributionControl: false,
+      attributionControl: true,
     });
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 20,
-    }).addTo(map);
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    }).on('tileerror',()=>setTileError(true)).on('tileload',()=>setTileError(false)).addTo(map);
 
     // Marcador del rover
-    const marker = L.marker([lat || -24.7859, lon || -65.4117], {
+    const marker = L.marker([lat, lon], {
       icon: makeRoverIcon(yaw, fix),
       zIndexOffset: 1000,
-    }).addTo(map);
+    });
 
     // Línea del rastro
     const trail = L.polyline([], {
@@ -88,7 +91,15 @@ export default function RoverMap({ lat, lon, yaw = 0, fix = false, sats = 0 }: R
   // Actualizar posición cuando cambia lat/lon/yaw
   useEffect(() => {
     if (!mapRef.current || !markerRef.current || !trailRef.current) return;
-    if (!lat && !lon) return; // no mover si no hay coordenadas
+    if (!fix) {
+      markerRef.current.remove();
+      return;
+    }
+    markerRef.current.addTo(mapRef.current);
+    if (!hasFix.current) {
+      mapRef.current.setView([lat, lon], 18);
+      hasFix.current = true;
+    }
 
     const pos: [number, number] = [lat, lon];
 
@@ -162,7 +173,7 @@ export default function RoverMap({ lat, lon, yaw = 0, fix = false, sats = 0 }: R
             }`}>
             🎯
           </button>
-          <button
+          <button disabled={!fix}
             onClick={centerOnRover}
             title="Centrar en rover"
             className="w-7 h-7 rounded text-[11px] flex items-center justify-center border bg-slate-900/80 border-slate-700 text-slate-400 hover:text-white transition-colors">
@@ -186,6 +197,7 @@ export default function RoverMap({ lat, lon, yaw = 0, fix = false, sats = 0 }: R
         )}
       </div>
 
+      {tileError && <small>Fondo cartográfico sin conexión. El GPS usa la red local.</small>}
       {/* Footer */}
       {trailLen > 0 && (
         <div className="px-3 py-1 border-t border-slate-800">

@@ -14,7 +14,7 @@ import json
 
 # ── Estado de misión (compartido con jetson_server vía getters) ───────────────
 
-_mission_lock = threading.Lock()
+_mission_lock = threading.RLock()
 _mission_state = {
     "active":        False,
     "queue":         [],      # lista de objetivos pendientes
@@ -55,6 +55,8 @@ def start_mission(objective_queue: list):
 def stop_mission():
     """E-STOP de misión: detiene el executor en el próximo ciclo."""
     with _mission_lock:
+        _mission_state["active"] = False
+        _mission_state["queue"] = []
         _mission_state["stop_requested"] = True
         _mission_state["status"]         = "PAUSED"
         _mission_state["log"].append("[MISSION] Stop solicitado")
@@ -264,15 +266,6 @@ def _action_stop(params: dict, hw) -> bool:
 
 
 # Mapa de acciones disponibles
-_ACTION_MAP = {
-    "NAVIGATE_TO":       _action_navigate_to,
-    "SEARCH_AND_PICK":   _action_search_and_pick,
-    "NAVIGATE_FORWARD":  _action_navigate_forward,
-    "TURN":              _action_turn,
-    "DISCHARGE":         _action_discharge,
-    "WAIT":              _action_wait,
-    "STOP":              _action_stop,
-}
 
 def _action_navigate_forward(params: dict, hw) -> bool:
     """Avanza N metros usando tiempo estimado."""
@@ -319,14 +312,25 @@ def _action_turn(params: dict, hw) -> bool:
 
 # ── Loop principal del executor ───────────────────────────────────────────────
 
-def executor_loop(hw):
+_ACTION_MAP = {
+    "NAVIGATE_TO":       _action_navigate_to,
+    "SEARCH_AND_PICK":   _action_search_and_pick,
+    "NAVIGATE_FORWARD":  _action_navigate_forward,
+    "TURN":              _action_turn,
+    "DISCHARGE":         _action_discharge,
+    "WAIT":              _action_wait,
+    "STOP":              _action_stop,
+}
+
+
+def executor_loop(hw, shutdown=None):
     """
     Hilo principal del executor. hw = instancia de HardwareInterface.
     Procesa la cola de objetivos secuencialmente.
     """
     _log("Executor listo — esperando misión")
 
-    while True:
+    while shutdown is None or not shutdown.is_set():
         # Esperar a que haya misión activa
         with _mission_lock:
             active = _mission_state["active"]

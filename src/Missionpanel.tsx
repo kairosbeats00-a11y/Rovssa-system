@@ -1,3 +1,4 @@
+import { apiFetch } from './api';
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import L from 'leaflet';
@@ -585,50 +586,17 @@ export default function MissionPanel({ jetsonIP, telemetryGps, addLog }: Props) 
 
   const runningIndex = (!missionStatus || !isRunning) ? -1 : missionStatus.completed.length;
 
-  const startMission = useCallback(async () => {
-    if (blocks.length === 0) { addLog('⚠️  Agregá al menos un bloque'); return; }
-    if (isRunning) {
-      await fetch(`http://${jetsonIP}:8000/mission/stop`, { method: 'POST' });
-      await new Promise(r => setTimeout(r, 600));
-      if (pollRef.current) clearInterval(pollRef.current);
-      setIsRunning(false);
-    }
-    const objectives = blocksToObjectives(blocks);
-    try {
-      const res = await fetch(`http://${jetsonIP}:8000/mission`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ objectives }),
-      });
-      if (!res.ok) { const e = await res.json(); throw new Error(e.error ?? 'Error desconocido'); }
-      setIsRunning(true);
-      addLog(`🚀 "${missionName}" — ${objectives.length} pasos enviados`);
-
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = setInterval(async () => {
-        try {
-          const r    = await fetch(`http://${jetsonIP}:8000/mission/status`);
-          const data: MissionStatus = await r.json();
-          setMissionStatus(data);
-          if (data.status === 'DONE' || data.status === 'ERROR') {
-            clearInterval(pollRef.current!);
-            setIsRunning(false);
-            addLog(`Misión ${data.status === 'DONE' ? '✅ completada' : '❌ con error'}`);
-          }
-        } catch {}
-      }, 800);
-    } catch (e: any) {
-      addLog(`❌ Error: ${e.message}`);
-    }
-  }, [blocks, jetsonIP, missionName, addLog]);
+  const startMission = useCallback(() => {
+    addLog('Autonomía deshabilitada hasta validar seguridad en hardware');
+  }, [addLog]);
 
   const stopMission = useCallback(async () => {
     try {
-      await fetch(`http://${jetsonIP}:8000/mission/stop`, { method: 'POST' });
+      await apiFetch('/mission/stop', { method: 'POST', body: '{}' });
       if (pollRef.current) clearInterval(pollRef.current);
       setIsRunning(false);
       addLog('🛑 Misión detenida');
-    } catch {}
+    } catch (error) { addLog(`Parada NO confirmada: ${String(error)}`); }
   }, [jetsonIP, addLog]);
 
   const clearAll = () => {

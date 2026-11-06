@@ -16,15 +16,12 @@ Conexión física M8N:
 """
 
 import threading
+from diagnostics import note
 import time
 import os
 
-GPS_PORTS = [
-    "/dev/ttyTHS1",   # UART nativa Jetson Nano — preferida
-    "/dev/ttyACM1",   # USB CDC (si viene por USB)
-    "/dev/ttyUSB0",   # USB-serial adapter
-    "/dev/ttyUSB1",
-]
+# USB enumeration also includes motor controllers. Only open the configured GPS.
+GPS_PORTS = [os.environ.get("ROVSSA_GPS_PORT", "/dev/ttyTHS1")]
 GPS_BAUD = 9600   # NEO-M8N default, puede ser 38400 si fue reconfigurado
 
 
@@ -44,7 +41,7 @@ def gps_reader_thread(gps_lock, gps_dict):
         import serial
         import pynmea2
     except ImportError as e:
-        print(f"⚠️  Dependencia GPS faltante: {e}")
+        note("gps", f"⚠️  Dependencia GPS faltante: {e}")
         print("   pip3 install pyserial pynmea2 --break-system-packages")
         return
 
@@ -57,13 +54,13 @@ def gps_reader_thread(gps_lock, gps_dict):
     while True:
         port = find_gps_port()
         if not port:
-            print("⚠️  GPS no encontrado — reintentando en 5s...")
+            note("gps", "⚠️  GPS no encontrado — reintentando en 5s...")
             with gps_lock:
                 gps_dict["fix"] = False
             time.sleep(5)
             continue
 
-        print(f"✅ GPS encontrado en {port}")
+        note("gps", f"✅ GPS encontrado en {port}")
 
         try:
             ser = serial.Serial(port, GPS_BAUD, timeout=2.0)
@@ -91,6 +88,7 @@ def gps_reader_thread(gps_lock, gps_dict):
                             if fix:
                                 with gps_lock:
                                     gps_dict["fix"]  = True
+                                    gps_dict["updated_at"] = time.monotonic()
                                     gps_dict["lat"]  = float(msg.latitude)
                                     gps_dict["lon"]  = float(msg.longitude)
                                     gps_dict["alt"]  = float(msg.altitude) if msg.altitude else 0.0
@@ -110,7 +108,7 @@ def gps_reader_thread(gps_lock, gps_dict):
                         pass  # sentencia incompleta o corrupta — ignorar
 
         except serial.SerialException as e:
-            print(f"❌ Error GPS serial: {e} — reintentando en 5s...")
+            note("gps", f"❌ Error GPS serial: {e} — reintentando en 5s...")
             with gps_lock:
                 gps_dict["fix"] = False
             time.sleep(5)

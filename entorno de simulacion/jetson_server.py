@@ -11,7 +11,7 @@ INSTALACIÓN (correr una sola vez):
     sudo pip3 install Jetson.GPIO
     # Permisos serial USB (Pico):
     sudo usermod -a -G dialout $USER   # requiere re-login o:
-    sudo chmod 666 /dev/ttyACM0
+    # No usar chmod 666; volver a iniciar sesión después de agregar dialout.
 
 ═══════════════════════════════════════════════════════════════════════════
 PINOUT HC-SR04 — Jetson Nano 40-pin header (BCM numbering):
@@ -42,7 +42,7 @@ Cámara Brazo (USB):
 EJECUCIÓN:
     python3 jetson_server.py
 
-El frontend (React) se conecta a http://<IP_JETSON>:8000
+El frontend se sirve detrás del proxy HTTPS autenticado. Ver SECURITY.md.
 ═══════════════════════════════════════════════════════════════════════════
 """
 
@@ -55,92 +55,97 @@ import queue
 import sys
 import os
 
+from diagnostics import note, recent, remember_signals
+from safety import SafetyController
+from security import install_security
+
+app = Flask(__name__)
+install_security(app)
+safety = SafetyController()
+NETWORK_DRIVE_ENABLED = False
+SIMULATION = os.environ.get("ROVSSA_SIMULATION") == "1"
+
 # ── ZMQ + SO101 (con fallbacks seguros) ──────────────────────────────────────
 
-try:
-    import zmq as _zmq
-    ZMQ_AVAILABLE = True
-except ImportError:
-    ZMQ_AVAILABLE = False
-    print("⚠️  pyzmq no instalado — teleoperación ZMQ deshabilitada")
-
-try:
-    from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
-    from lerobot.robots.so_follower.so_follower import SOFollower
-    LEROBOT_AVAILABLE = True
-except ImportError:
-    LEROBOT_AVAILABLE = False
-    print("⚠️  lerobot no instalado — brazo SO101 deshabilitado")
-
-# ── Importaciones de hardware (con fallbacks seguros) ─────────────────────────
-
-try:
-    import serial
-    import serial.tools.list_ports
-    SERIAL_AVAILABLE = True
-except ImportError:
-    SERIAL_AVAILABLE = False
-    print("⚠️  pyserial no instalado. pip3 install pyserial")
-
-I2C_AVAILABLE = False
-
-import subprocess as _subprocess
-
-def _check_gstreamer():
-    """Verifica que gst-launch-1.0 está disponible en el sistema."""
-    try:
-        r = _subprocess.run(
-            ['gst-launch-1.0', '--version'],
-            stdout=_subprocess.PIPE, stderr=_subprocess.PIPE, timeout=3
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
-
-GST_AVAILABLE = _check_gstreamer()
-if GST_AVAILABLE:
-    print("✅ GStreamer disponible")
+if SIMULATION:
+    ZMQ_AVAILABLE = LEROBOT_AVAILABLE = SERIAL_AVAILABLE = False
+    I2C_AVAILABLE = GST_AVAILABLE = CV2_AVAILABLE = GPIO_AVAILABLE = False
+    _bno_instance = None
 else:
-    print("⚠️  GStreamer no encontrado — video deshabilitado")
-# Alias para no cambiar el resto del código
-CV2_AVAILABLE = False
+    # ── Importaciones de hardware (con fallbacks seguros) ─────────────────────────
 
-# Inicializar BNO085 antes de GPIO para evitar conflicto de bus I2C
-_bno_instance = None
-try:
-    import board as _board
-    import busio as _busio
-    from adafruit_bno08x.i2c import BNO08X_I2C as _BNO08X_I2C
-    from adafruit_bno08x import BNO_REPORT_ROTATION_VECTOR as _BNO_RV
-    _i2c_bus = _busio.I2C(_board.SCL, _board.SDA)
-    _bno_instance = _BNO08X_I2C(_i2c_bus, address=0x4B)
-    _bno_instance.enable_feature(_BNO_RV)
-    print("✅ BNO085 pre-inicializado")
-except Exception as _e:
-    print(f"⚠️  BNO085 no disponible: {_e}")
-
-try:
-    import Jetson.GPIO as GPIO
-    GPIO.setmode(GPIO.BCM)
-    GPIO_AVAILABLE = True
-    print("✅ Jetson.GPIO disponible")
-except Exception:
     try:
-        import RPi.GPIO as GPIO
+        import serial
+        import serial.tools.list_ports
+        SERIAL_AVAILABLE = True
+    except ImportError:
+        SERIAL_AVAILABLE = False
+        print("⚠️  pyserial no instalado. pip3 install pyserial")
+
+    I2C_AVAILABLE = False
+
+    import subprocess as _subprocess
+
+    def _check_gstreamer():
+        """Verifica que gst-launch-1.0 está disponible en el sistema."""
+        try:
+            r = _subprocess.run(
+                ['gst-launch-1.0', '--version'],
+                stdout=_subprocess.PIPE, stderr=_subprocess.PIPE, timeout=3
+            )
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    GST_AVAILABLE = _check_gstreamer()
+    if GST_AVAILABLE:
+        print("✅ GStreamer disponible")
+    else:
+        print("⚠️  GStreamer no encontrado — video deshabilitado")
+    # Alias para no cambiar el resto del código
+    CV2_AVAILABLE = False
+
+    # Inicializar BNO085 antes de GPIO para evitar conflicto de bus I2C
+    _bno_instance = None
+    try:
+        import board as _board
+        import busio as _busio
+        from adafruit_bno08x.i2c import BNO08X_I2C as _BNO08X_I2C
+        from adafruit_bno08x import BNO_REPORT_ROTATION_VECTOR as _BNO_RV
+        _i2c_bus = _busio.I2C(_board.SCL, _board.SDA)
+        _bno_instance = _BNO08X_I2C(_i2c_bus, address=0x4B)
+        _bno_instance.enable_feature(_BNO_RV)
+        I2C_AVAILABLE = True
+        note("imu", "✅ BNO085 pre-inicializado")
+    except Exception as _e:
+        note("imu", f"⚠️  BNO085 no disponible: {_e}")
+
+    try:
+        import Jetson.GPIO as GPIO
         GPIO.setmode(GPIO.BCM)
         GPIO_AVAILABLE = True
-        print("✅ RPi.GPIO disponible (modo compatibilidad)")
+        print("✅ Jetson.GPIO disponible")
     except Exception:
-        GPIO_AVAILABLE = False
-        print("⚠️  GPIO no disponible — ultrasonidos deshabilitados")
+        try:
+            import RPi.GPIO as GPIO
+            GPIO.setmode(GPIO.BCM)
+            GPIO_AVAILABLE = True
+            print("✅ RPi.GPIO disponible (modo compatibilidad)")
+        except Exception:
+            GPIO_AVAILABLE = False
+            print("⚠️  GPIO no disponible — ultrasonidos deshabilitados")
 
 # ── Módulos de navegación autónoma (modo AI) ──────────────────────────────────
 from mission_executor import executor_loop, start_mission, stop_mission, get_mission_status
 from hardware_interface import HardwareInterface
-from yolo_detector import yolo_detector_thread
+from datetime import datetime, timezone
+import base64
+import signal
+import sqlite3
+import uuid
+import event_store
+import identity
 from gps_reader import gps_reader_thread
-
-app = Flask(__name__)
 
 # =============================================================================
 # CONFIGURACIÓN — Ajustar según hardware real
@@ -171,7 +176,7 @@ CAMERA_USB_INDEX = 0    # /dev/video0 — fallback CSI si no hay CSI
 # ── CÁMARA BRAZO (USB) ────────────────────────────────────────────────────────
 # Ajustar al índice real: ls /dev/video*
 # Si la CSI ocupa /dev/video0, la USB suele quedar en /dev/video1
-CAMERA_ARM_USB_INDEX = 1   # → /dev/video1
+CAMERA_ARM_USB_INDEX = int(os.environ.get("ROVSSA_USB_INDEX", "1"))   # → /dev/video1
 
 # Odometría — ajustar según tu rover real
 WHEEL_DIAMETER_M  = 0.12    # diámetro rueda en metros (medir con regla)
@@ -197,9 +202,9 @@ current_telemetry = {
     "pitch": 0.0,
     "roll":  0.0,
     "yaw":   0.0,
-    "distancia_frontal":   2.0,
-    "distancia_izquierda": 2.0,
-    "distancia_derecha":   2.0,
+    "distancia_frontal":   0.0,
+    "distancia_izquierda": 0.0,
+    "distancia_derecha":   0.0,
 }
 
 _pico_lock = threading.Lock()
@@ -222,14 +227,6 @@ estop_active = False
 # Cola de comandos para el hilo serial writer
 _cmd_queue = queue.Queue(maxsize=10)
 
-# Frame JPEG actual — cámara CSI principal
-_frame_lock = threading.Lock()
-current_frame = None
-
-# Frame JPEG actual — cámara USB brazo  ← NUEVO
-_frame_usb_lock = threading.Lock()
-current_frame_usb = None
-
 # ── Estado GPS (se puebla cuando se integre el M8N) ──────────────────────────
 _gps_lock = threading.Lock()
 gps_state = {"fix": False, "lat": 0.0, "lon": 0.0, "alt": 0.0, "sats": 0, "speed_ms": 0.0}
@@ -241,18 +238,6 @@ yolo_detections = {}   # {"bottle": {"cx": 320, "cy": 240, "area": 5000}, ...}
 # CORS
 # =============================================================================
 
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-    return response
-
-@app.route('/', methods=['OPTIONS'])
-@app.route('/<path:path>', methods=['OPTIONS'])
-def options_handler(path=''):
-    return '', 204
-
 # =============================================================================
 # HILO: LECTOR SERIAL DEL PICO
 # Recibe JSON lines: {"enc":[FL,FR,RL,RR],"mode":"RC","ch":[...]}
@@ -260,9 +245,9 @@ def options_handler(path=''):
 
 def find_pico_port():
     """Busca el puerto serial del Pico automáticamente."""
-    for port_path in PICO_PORTS:
-        if os.path.exists(port_path):
-            return port_path
+    configured = os.environ.get("ROVSSA_PICO_PORT")
+    if configured:
+        return configured if os.path.exists(configured) else None
     # Buscar por VID/PID del Pico (2E8A:0005)
     for port in serial.tools.list_ports.comports():
         if port.vid == 0x2E8A:
@@ -276,7 +261,7 @@ def serial_reader_thread():
     while True:
         port = find_pico_port() if SERIAL_AVAILABLE else None
         if not port:
-            print("⚠️  Pico no encontrado. Reintentando en 3s...")
+            note("pico", "⚠️  Pico no encontrado. Reintentando en 3s...")
             with _pico_lock:
                 pico_state["connected"] = False
             time.sleep(3)
@@ -284,7 +269,7 @@ def serial_reader_thread():
 
         try:
             ser = serial.Serial(port, PICO_BAUD, timeout=1.0)
-            print(f"✅ Pico conectado en {port}")
+            note("pico", f"✅ Pico conectado en {port}")
             with _pico_lock:
                 pico_state["connected"] = True
 
@@ -301,11 +286,14 @@ def serial_reader_thread():
                         continue
                     try:
                         msg = json.loads(line)
-                        enc = msg.get("enc", [0, 0, 0, 0])
-                        mode = msg.get("mode", "GCS")
-                        ch = msg.get("ch", [1500] * 6)
+                        enc = msg.get("enc") if isinstance(msg, dict) else None
+                        if not isinstance(enc, list) or len(enc) != 4 or any(type(v) is not int for v in enc):
+                            continue
+                        mode = msg.get("mode")
+                        ch = msg.get("ch")
 
                         with _pico_lock:
+                            pico_state["updated_at"] = time.monotonic()
                             pico_state["enc"]  = enc
                             pico_state["mode"] = mode
                             pico_state["ch"]   = ch
@@ -317,7 +305,7 @@ def serial_reader_thread():
                         pass  # línea de debug del Pico ("Pico listo.", etc.)
 
         except serial.SerialException as e:
-            print(f"❌ Error serial Pico: {e}. Reintentando en 3s...")
+            note("pico", f"❌ Error serial Pico: {e}. Reintentando en 3s...")
             with _pico_lock:
                 pico_state["connected"] = False
             time.sleep(3)
@@ -349,43 +337,38 @@ def _update_odometry(enc_new):
 # =============================================================================
 
 def serial_writer_thread():
-    """Lee de _cmd_queue y escribe al Pico."""
-    print("📤 Hilo serial writer iniciado...")
+    """Bounded writes through the shared interlock; never replay a command queue."""
     ser = None
-
     while True:
-        # Intentar tener la conexión serial
-        if ser is None or not ser.is_open:
-            port = find_pico_port() if SERIAL_AVAILABLE else None
-            if port:
-                try:
-                    ser = serial.Serial(port, PICO_BAUD, timeout=1.0)
-                except Exception:
-                    ser = None
-            if ser is None:
-                time.sleep(1)
-                continue
-
         try:
-            cmd = _cmd_queue.get(timeout=0.5)
-            line = json.dumps(cmd) + "\n"
-            ser.write(line.encode('utf-8'))
-        except queue.Empty:
-            pass
-        except serial.SerialException:
+            if ser is None or not ser.is_open:
+                port = find_pico_port() if SERIAL_AVAILABLE else None
+                if not port:
+                    safety.trip("Pico disconnected")
+                    time.sleep(0.2)
+                    continue
+                ser = serial.Serial(port, PICO_BAUD, timeout=0.2, write_timeout=0.2)
+                safety.trip("serial reconnected: rearm required")
+            safety.dispatch(lambda cmd: ser.write((json.dumps(cmd)+"\n").encode("utf-8")))
+        except Exception:
+            safety.trip("serial write failed")
+            if ser is not None:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
             ser = None
+        time.sleep(0.05)
+
 
 def send_to_pico(cmd: dict):
-    """Helper seguro para encolar un comando al Pico."""
-    try:
-        _cmd_queue.put_nowait(cmd)
-    except queue.Full:
-        # Descartar el más viejo y meter el nuevo
-        try:
-            _cmd_queue.get_nowait()
-            _cmd_queue.put_nowait(cmd)
-        except Exception:
-            pass
+    safety.submit(cmd)
+
+
+def watchdog_thread():
+    while True:
+        safety.tick()
+        time.sleep(0.05)
 
 # =============================================================================
 # HILO: IMU — MPU6050 via I2C
@@ -407,10 +390,10 @@ def imu_thread(bno=None):
     print(f"🧭 Iniciando IMU BNO085 (addr 0x{BNO085_ADDR:02X})...")
 
     if bno is None:
-        print("⚠️  BNO085 no inicializado — IMU deshabilitada")
+        note("imu", "⚠️  BNO085 no inicializado — IMU deshabilitada")
         return
     
-    print("✅ BNO085 listo")
+    note("imu", "✅ BNO085 listo")
 
     import math as _math
 
@@ -426,11 +409,11 @@ def imu_thread(bno=None):
             # Quaternion → Euler (pitch, roll, yaw) en grados
             sinr_cosp = 2.0 * (real * i + j * k)
             cosr_cosp = 1.0 - 2.0 * (i * i + j * j)
-            pitch = _math.degrees(_math.atan2(sinr_cosp, cosr_cosp))
+            roll = _math.degrees(_math.atan2(sinr_cosp, cosr_cosp))
 
             sinp = 2.0 * (real * j - k * i)
             sinp = max(-1.0, min(1.0, sinp))
-            roll = _math.degrees(_math.asin(sinp))
+            pitch = _math.degrees(_math.asin(sinp))
 
             siny_cosp = 2.0 * (real * k + i * j)
             cosy_cosp = 1.0 - 2.0 * (j * j + k * k)
@@ -442,6 +425,7 @@ def imu_thread(bno=None):
                 _imu_yaw   = yaw
 
             with _telem_lock:
+                current_telemetry["imu_updated"] = time.monotonic()
                 current_telemetry["pitch"] = round(pitch, 2)
                 current_telemetry["roll"]  = round(roll,  2)
                 current_telemetry["yaw"]   = round(yaw,   2)
@@ -469,10 +453,10 @@ def _setup_ultrasonic_gpio():
             GPIO.output(pin, False)
         for pin in [US_FRONT_ECHO, US_LEFT_ECHO, US_RIGHT_ECHO]:
             GPIO.setup(pin, GPIO.IN)
-        print("✅ GPIO ultrasonidos configurado")
+        note("sonar", "✅ GPIO ultrasonidos configurado")
         return True
     except Exception as e:
-        print(f"⚠️  Error configurando GPIO: {e}")
+        note("sonar", f"⚠️  Error configurando GPIO: {e}")
         return False
 
 def _measure_distance_cm(trig_pin, echo_pin, timeout_s=0.03):
@@ -489,13 +473,13 @@ def _measure_distance_cm(trig_pin, echo_pin, timeout_s=0.03):
         t_start = time.time()
         while GPIO.input(echo_pin) == 0:
             if time.time() - t_start > timeout_s:
-                return 500.0   # timeout → 5 m (sin obstáculo)
+                return 0.0   # unknown: fail closed
         pulse_start = time.time()
 
         # Esperar fin del eco
         while GPIO.input(echo_pin) == 1:
             if time.time() - pulse_start > timeout_s:
-                return 500.0
+                return 0.0
         pulse_end = time.time()
 
         # Convertir a cm (velocidad sonido ≈ 34300 cm/s, ida y vuelta / 2)
@@ -503,7 +487,7 @@ def _measure_distance_cm(trig_pin, echo_pin, timeout_s=0.03):
         return min(max(dist_cm, 2.0), 500.0)   # clamp 2..500 cm
 
     except Exception:
-        return 500.0
+        return 0.0
 
 def ultrasonic_thread():
     if not GPIO_AVAILABLE:
@@ -526,6 +510,7 @@ def ultrasonic_thread():
             dist_m = _measure_distance_cm(trig, echo) / 100.0
             with _telem_lock:
                 current_telemetry[key] = round(dist_m, 3)
+                current_telemetry[key + "_updated"] = time.monotonic()
             time.sleep(0.015)   # 15 ms entre disparos para evitar interferencia
 
         time.sleep(0.005)
@@ -533,13 +518,6 @@ def ultrasonic_thread():
 # =============================================================================
 # HILO: CÁMARA FPV CSI (principal — sin tocar)
 # =============================================================================
-
-JPEG_TMP = "/tmp/rovssa_frame.jpg"
-_GST_PIPELINES = [
-    "nvarguscamerasrc ! video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1 ! nvvidconv ! video/x-raw,format=I420 ! jpegenc quality=70 ! multifilesink location=/tmp/rovssa_frame.jpg",
-    "nvarguscamerasrc ! video/x-raw(memory:NVMM),width=1920,height=1080,framerate=30/1 ! nvvidconv ! video/x-raw,format=I420 ! jpegenc quality=70 ! multifilesink location=/tmp/rovssa_frame.jpg",
-    "v4l2src device=/dev/video0 ! videoconvert ! video/x-raw,format=I420 ! videoscale ! video/x-raw,width=640,height=480 ! jpegenc quality=70 ! multifilesink location=/tmp/rovssa_frame.jpg",
-]
 
 def _parse_jpeg_frames(pipe_stdout):
     """
@@ -551,7 +529,7 @@ def _parse_jpeg_frames(pipe_stdout):
     CHUNK = 65536  # 64 KB por lectura
 
     while True:
-        chunk = pipe_stdout.read(CHUNK)
+        chunk = pipe_stdout.read1(CHUNK)
         if not chunk:
             break
         buf += chunk
@@ -560,192 +538,48 @@ def _parse_jpeg_frames(pipe_stdout):
         while True:
             start = buf.find(b"\xff\xd8")
             if start == -1:
-                buf = b""          # no hay inicio — descartar todo
+                buf = buf[-1:]     # SOI may straddle two chunks
                 break
             end = buf.find(b"\xff\xd9", start + 2)
             if end == -1:
-                buf = buf[start:]  # inicio encontrado pero sin fin — esperar más datos
+                buf = buf[start:] if len(buf) - start < 4000000 else b""
                 break
             # Frame completo [start : end+2]
             yield buf[start : end + 2]
             buf = buf[end + 2:]
 
-def video_capture_thread():
-    global current_frame
+# One reader per camera owns its GStreamer process. Both preview and evidence
+# consume the same complete JPEG, stamped when it reaches the Jetson.
+frames = {}
+frames_lock = threading.Lock()
 
+def capture_camera(name, pipeline):
     if not GST_AVAILABLE:
-        print("⚠️  GStreamer no disponible — video CSI deshabilitado")
+        note(name, 'GStreamer no disponible')
         return
-
-    import os as _os
-
-    CMD = [
-        'gst-launch-1.0', 'nvarguscamerasrc', '!',
-        'video/x-raw(memory:NVMM),width=640,height=480,framerate=15/1', '!',
-        'nvvidconv', '!', 'video/x-raw,format=I420', '!',
-        'jpegenc', 'quality=50', '!',
-        'multifilesink', 'location=/tmp/rovssa_frame.jpg'
-    ]
-
+    command = ['gst-launch-1.0', '-q', *pipeline, '!', 'fdsink', 'fd=1']
     while True:
-        print("📷 Iniciando cámara CSI GStreamer...")
         try:
-            proc = _subprocess.Popen(
-                CMD,
-                stdout=_subprocess.DEVNULL,
-                stderr=_subprocess.DEVNULL,
-            )
-            time.sleep(2.0)
-            if proc.poll() is not None:
-                print("⚠️  GStreamer CSI cerró inmediatamente. Reintentando en 5s...")
-                time.sleep(5)
-                continue
+            with _subprocess.Popen(command, stdout=_subprocess.PIPE) as process:
+                for jpeg in _parse_jpeg_frames(process.stdout):
+                    with frames_lock:
+                        frames[name] = (time.monotonic(), datetime.now(timezone.utc).isoformat(), jpeg)
+                note(name, f"GStreamer terminó con código {process.wait()}")
+        except OSError as exc:
+            note(name, str(exc))
+        time.sleep(3)
 
-            print("✅ Cámara CSI GStreamer abierta")
 
-            while proc.poll() is None:
-                try:
-                    if _os.path.exists('/tmp/rovssa_frame.jpg'):
-                        with open('/tmp/rovssa_frame.jpg', 'rb') as f:
-                            data = f.read()
-                        if data and len(data) > 500:
-                            with _frame_lock:
-                                current_frame = data
-                except Exception:
-                    pass
-                time.sleep(0.033)
+def video_capture_thread():
+    capture_camera('csi', ['nvarguscamerasrc', '!',
+        'video/x-raw(memory:NVMM),width=640,height=480,framerate=15/1', '!',
+        'nvvidconv', '!', 'video/x-raw,format=I420', '!', 'jpegenc', 'quality=65'])
 
-            print("⚠️  Proceso GStreamer CSI terminó. Reintentando en 3s...")
-            time.sleep(3)
-
-        except Exception as e:
-            print("⚠️  Error cámara CSI: " + str(e))
-            time.sleep(3)
-
-# =============================================================================
-# HILO: CÁMARA USB BRAZO (nueva — independiente de la CSI)
-# Usa v4l2src con el índice CAMERA_ARM_USB_INDEX (/dev/video1 por defecto).
-# Si GStreamer no está disponible intenta leer el archivo directamente
-# (modo de compatibilidad mínima).
-# =============================================================================
-
-JPEG_TMP_USB = "/tmp/rovssa_frame_usb.jpg"
 
 def video_capture_usb_thread():
-    """Captura MJPEG de la cámara USB del brazo mecánico.
-    La cámara entrega MJPEG nativo — se usa jpegparse directo, sin conversión."""
-    global current_frame_usb
+    capture_camera('usb', ['v4l2src', f'device=/dev/video{CAMERA_ARM_USB_INDEX}', '!',
+        'image/jpeg,width=640,height=480,framerate=30/1', '!', 'jpegparse'])
 
-    import os as _os
-
-    device = f"/dev/video{CAMERA_ARM_USB_INDEX}"
-
-    if not GST_AVAILABLE:
-        print(f"⚠️  GStreamer no disponible — cámara USB brazo ({device}) deshabilitada")
-        return
-
-    CMD = [
-        'gst-launch-1.0',
-        'v4l2src', f'device={device}', '!',
-        'image/jpeg,width=640,height=480,framerate=30/1', '!',
-        'jpegparse', '!',
-        'multifilesink', f'location={JPEG_TMP_USB}'
-    ]
-
-    while True:
-        if not _os.path.exists(device):
-            print(f"⚠️  Cámara brazo {device} no encontrada. Reintentando en 5s...")
-            time.sleep(5)
-            continue
-
-        print(f"📷 Iniciando cámara USB brazo ({device}) — MJPEG nativo...")
-        try:
-            proc = _subprocess.Popen(
-                CMD,
-                stdout=_subprocess.DEVNULL,
-                stderr=_subprocess.PIPE,
-            )
-            time.sleep(2.0)
-
-            if proc.poll() is not None:
-                err = proc.stderr.read().decode('utf-8', errors='ignore')
-                print(f"⚠️  GStreamer USB cerró inmediatamente:\n{err}")
-                time.sleep(5)
-                continue
-
-            print(f"✅ Cámara USB brazo abierta")
-
-            while proc.poll() is None:
-                try:
-                    if _os.path.exists(JPEG_TMP_USB):
-                        with open(JPEG_TMP_USB, 'rb') as f:
-                            data = f.read()
-                        if data and len(data) > 500:
-                            with _frame_usb_lock:
-                                current_frame_usb = data
-                except Exception:
-                    pass
-                time.sleep(0.033)
-
-            err = proc.stderr.read().decode('utf-8', errors='ignore')
-            print(f"⚠️  GStreamer USB terminó. {err[:200] if err else ''} Reintentando en 5s...")
-            time.sleep(5)
-
-        except Exception as e:
-            print(f"⚠️  Error cámara USB brazo: {e}")
-            time.sleep(5)
-
-
-    while True:
-        # Verificar que el dispositivo existe antes de abrir GStreamer
-        if not _os.path.exists(device):
-            print(f"⚠️  Cámara brazo {device} no encontrada. Reintentando en 5s...")
-            time.sleep(5)
-            continue
-
-        print(f"📷 Iniciando cámara USB brazo ({device})...")
-
-        # Intentar primero con JPEG nativo, luego con conversión
-        for attempt, cmd in enumerate([CMD, CMD_FALLBACK]):
-            try:
-                proc = _subprocess.Popen(
-                    cmd,
-                    stdout=_subprocess.DEVNULL,
-                    stderr=_subprocess.DEVNULL,
-                )
-                time.sleep(2.0)
-
-                if proc.poll() is not None:
-                    print(f"⚠️  GStreamer USB (intento {attempt+1}) cerró inmediatamente.")
-                    continue
-
-                print(f"✅ Cámara USB brazo abierta (pipeline {attempt+1})")
-
-                while proc.poll() is None:
-                    try:
-                        if _os.path.exists(JPEG_TMP_USB):
-                            with open(JPEG_TMP_USB, 'rb') as f:
-                                data = f.read()
-                            if data and len(data) > 500:
-                                with _frame_usb_lock:
-                                    current_frame_usb = data
-                    except Exception:
-                        pass
-                    time.sleep(0.033)
-
-                proc.terminate()
-                break  # salir del loop de intentos si el proceso corrió OK
-
-            except Exception as e:
-                print(f"⚠️  Error cámara USB brazo (intento {attempt+1}): {e}")
-
-        print("⚠️  Cámara USB brazo: reintentando en 5s...")
-        time.sleep(5)
-
-
-# =============================================================================
-# CEREBRO AUTÓNOMO
-# =============================================================================
 
 def autonomous_brain_thread():
     estado = "AVANZANDO"
@@ -829,54 +663,8 @@ def autonomous_brain_thread():
 _robot_lock = threading.Lock()
 
 def zmq_arm_thread(robot):
-    """PULL 5555 — recibe comandos {"arm": {...}} del Mac
-       PUSH 5556 — envía observaciones {"arm": {...}} al Mac"""
-    if not ZMQ_AVAILABLE or robot is None:
-        print("⚠️  ZMQ/SO101 no disponible — hilo teleoperación deshabilitado")
-        return
-
-    print(f"🦾 ZMQ arm thread iniciado (cmd={ZMQ_CMD_PORT}, obs={ZMQ_OBS_PORT})")
-    context = _zmq.Context()
-
-    cmd_socket = context.socket(_zmq.PULL)
-    cmd_socket.setsockopt(_zmq.CONFLATE, 1)
-    cmd_socket.setsockopt(_zmq.RCVTIMEO, 0)
-    cmd_socket.bind(f"tcp://*:{ZMQ_CMD_PORT}")
-
-    obs_socket = context.socket(_zmq.PUSH)
-    obs_socket.setsockopt(_zmq.CONFLATE, 1)
-    obs_socket.bind(f"tcp://*:{ZMQ_OBS_PORT}")
-
-    print("✅ ZMQ arm listo")
-
-    while True:
-        # Recibir y ejecutar comando
-        try:
-            msg = cmd_socket.recv_string(_zmq.NOBLOCK)
-            arm_cmd = json.loads(msg).get("arm")
-            if arm_cmd:
-                with _robot_lock:
-                    try:
-                        robot.send_action(arm_cmd)
-                    except Exception as e:
-                        print(f"⚠️  Error enviando acción al brazo: {e}")
-        except _zmq.Again:
-            pass
-        except Exception as e:
-            print(f"⚠️  Error ZMQ recv: {e}")
-
-        # Leer observación y publicar
-        try:
-            with _robot_lock:
-                obs_raw = robot.get_observation()
-            obs = {k: float(v) for k, v in obs_raw.items() if not hasattr(v, "shape")}
-            obs_socket.send_string(json.dumps({"arm": obs}), _zmq.NOBLOCK)
-        except _zmq.Again:
-            pass
-        except Exception as e:
-            print(f"⚠️  Error ZMQ obs: {e}")
-
-        time.sleep(0.033)   # ~30 Hz
+    """Disabled until authenticated transport and physical interlocks are validated."""
+    return
 
 # =============================================================================
 # FLASK ENDPOINTS
@@ -884,12 +672,27 @@ def zmq_arm_thread(robot):
 
 # ── SSE: telemetría rover (IMU + ultrasonidos) ────────────────────────────────
 
+def sensor_snapshot():
+    with _telem_lock:
+        data = dict(current_telemetry)
+    for key in ("distancia_frontal", "distancia_izquierda", "distancia_derecha"):
+        if time.monotonic() - data.pop(key + "_updated", float("-inf")) >= 2:
+            data[key] = 0
+    data["imu_live"] = time.monotonic() - data.pop("imu_updated", float("-inf")) < 2
+    with _gps_lock:
+        data["gps"] = dict(gps_state)
+    if time.monotonic() - data["gps"].pop("updated_at", float("-inf")) > 3:
+        data["gps"]["fix"] = False
+    return data
+
+
 def _generate_telemetry():
     while True:
-        with _telem_lock:
-            data = dict(current_telemetry)
-        with _gps_lock:
-            data["gps"] = dict(gps_state)
+        data = sensor_snapshot()
+        data["control"] = safety.snapshot()
+        data["simulation"] = SIMULATION
+        with frames_lock:
+            data["cameras"] = {k: time.monotonic() - v[0] < 2 for k, v in frames.items()}
         yield f"data: {json.dumps(data)}\n\n"
         time.sleep(0.1)
 
@@ -913,7 +716,7 @@ def _generate_pico_telemetry():
                 "enc_FR": ps["enc"][1],
                 "enc_RL": ps["enc"][2],
                 "enc_RR": ps["enc"][3],
-                "pico_connected": ps["connected"],
+                "pico_connected": ps["connected"] and time.monotonic() - ps.get("updated_at", float("-inf")) < 3,
             },
             "odom": {
                 "x":     round(od["x"], 3),
@@ -933,136 +736,178 @@ def arm_telemetry():
 
 # ── Video FPV CSI ─────────────────────────────────────────────────────────────
 
-def _generate_frames():
-    """MJPEG multipart stream — cámara CSI principal."""
-    while True:
-        with _frame_lock:
-            frame = current_frame
+def stream_camera(name):
+    def generate():
+        last = None
+        while True:
+            with frames_lock:
+                frame = frames.get(name)
+            if frame and frame[0] != last and time.monotonic() - frame[0] < 2:
+                last = frame[0]
+                yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame[2] + b'\r\n'
+            time.sleep(0.033)
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-        if frame:
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-        time.sleep(0.033)
 
 @app.route('/video_feed')
-def video_feed():
-    return Response(_generate_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-
 @app.route('/camera_csi')
 def camera_csi():
-    """Alias — misma cámara FPV CSI."""
-    return Response(_generate_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    return stream_camera('csi')
 
-# ── Video USB Brazo ───────────────────────────────────────────────────────────
-
-def _generate_frames_usb():
-    """MJPEG multipart stream — cámara USB del brazo mecánico."""
-    while True:
-        with _frame_usb_lock:
-            frame = current_frame_usb
-
-        if frame:
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-        time.sleep(0.033)
 
 @app.route('/camera_usb')
 def camera_usb():
-    """Cámara USB del brazo mecánico."""
-    return Response(_generate_frames_usb(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    return stream_camera('usb')
+
+
+def record_event(event_id, trigger):
+    data = sensor_snapshot()
+    with frames_lock:
+        available = dict(frames)
+    images = {}
+    for name in ("csi", "usb"):
+        frame = available.get(name)
+        images[name] = None
+        if frame and time.monotonic() - frame[0] < 2:
+            images[name] = {"received_at": frame[1], "jpeg_base64": base64.b64encode(frame[2]).decode("ascii")}
+    with _pico_lock:
+        pico = dict(pico_state)
+    with _odom_lock:
+        odom = dict(odometry)
+    pico_live = pico["connected"] and time.monotonic() - pico.get("updated_at", float("-inf")) < 3
+    return event_store.save({
+        "schema": "rovssa.event.v2", "id": event_id, "trigger": trigger,
+        "station": os.environ["ROVSSA_ORIGIN"], "simulation": SIMULATION,
+        "observed_at": datetime.now(timezone.utc).isoformat(), "cameras": images,
+        "gps": data["gps"] if data["gps"]["fix"] else None,
+        "imu_degrees": {k: data[k] for k in ("pitch", "roll", "yaw")} if data["imu_live"] else None,
+        "proximity_m": {k: data["distancia_" + k] or None for k in ("frontal", "izquierda", "derecha")},
+        "pico": {"encoders": dict(zip(("FL","FR","RL","RR"), pico["enc"])),
+                 "odometry": odom, "mode": pico["mode"], "rc_channels": pico["ch"]} if pico_live else None,
+    })
+
+
+@app.errorhandler(sqlite3.Error)
+def storage_failure(exc):
+    app.logger.error("Event storage: %s", exc)
+    return jsonify(error="Error de almacenamiento en la Jetson. Revisá el espacio y los permisos."), 503
+
+
+@app.route('/events', methods=['GET','POST'])
+def events():
+    if request.method == 'GET':
+        return jsonify(event_store.list_events())
+    body = request.get_json(silent=True)
+    try:
+        event_id = str(uuid.UUID(body["id"]))
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return jsonify(error="Identificador de evento inválido"), 400
+    return jsonify(record_event(event_id, "station"))
+
+
+@app.get('/diagnostics')
+def diagnostics():
+    data = sensor_snapshot()
+    now = time.monotonic()
+    with frames_lock:
+        signals = {k: k in frames and now - frames[k][0] < 2 for k in ("csi","usb")}
+    with _pico_lock:
+        signals["pico"] = pico_state["connected"] and now - pico_state.get("updated_at", float("-inf")) < 3
+    signals.update(imu=data["imu_live"], gps=data["gps"]["fix"])
+    for name in ("frontal","izquierda","derecha"):
+        signals[name] = data["distancia_" + name] > 0
+    remember_signals(signals, SIMULATION)
+    return jsonify(signals=signals, logs=recent(), simulation=SIMULATION)
+
+
+@app.get('/identity')
+def capture_identity():
+    return jsonify(public_key=identity.public_key())
+
+
+@app.get('/events/<uuid:event_id>')
+def event_file(event_id):
+    content = event_store.read(str(event_id))
+    if content is None:
+        return jsonify(error="Evento desconocido"), 404
+    return Response(content, mimetype="application/json")
+
+
+def enable_local_capture():
+    # A local RC/GPIO adapter can signal the server even when the router is down.
+    triggers = queue.SimpleQueue()
+    def worker():
+        while True:
+            triggers.get()
+            try:
+                record_event(str(uuid.uuid4()), "local")
+            except Exception:
+                app.logger.exception("No se pudo guardar el evento local")
+    signal.signal(signal.SIGUSR1, lambda *_: triggers.put(True))
+    threading.Thread(target=worker, daemon=True).start()
+
+
+@app.post('/observations/<camera>')
+def observation(camera):
+    if camera not in ('usb', 'csi'):
+        return jsonify(error="Cámara desconocida"), 404
+    with frames_lock:
+        frame = frames.get(camera)
+    if not SIMULATION and (not frame or time.monotonic() - frame[0] >= 2):
+        return jsonify(error="La cámara no tiene una imagen reciente"), 409
+    data = sensor_snapshot()
+    return jsonify(schema="rovssa.observation.v1", simulation=SIMULATION,
+                   station=os.environ["ROVSSA_ORIGIN"], camera=camera,
+                   observed_at=datetime.now(timezone.utc).isoformat(),
+                   frame_received_at=frame[1] if frame else None,
+                   jpeg_base64=base64.b64encode(frame[2]).decode("ascii") if frame else None,
+                   gps=data["gps"] if data["gps"]["fix"] else None,
+                   imu={k: data[k] for k in ("pitch","roll","yaw")} if data["imu_live"] else None)
+
 
 # ── POST /command — recibe comandos del frontend (teclado, gamepad) ───────────
 
+@app.route('/heartbeat', methods=['POST'])
+def heartbeat():
+    return jsonify(safety.heartbeat())
+
+
 @app.route('/command', methods=['POST'])
 def command():
-    global rover_mode, estop_active
-
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("cmd"), str):
+        return jsonify(error="JSON object with cmd required"), 400
+    cmd = data["cmd"]
+    if not NETWORK_DRIVE_ENABLED:
+        return jsonify(error="Conducción por radiocontrol; órdenes de red desactivadas"), 409
+    if cmd in ("drive", "estop_release") and data.get("session") != safety.session:
+        return jsonify(error="Stale server session; refresh control status"), 409
     try:
-        data = request.get_json(force=True)
-    except Exception:
-        return jsonify({"error": "JSON inválido"}), 400
+        if cmd in ("stop", "estop"):
+            safety.trip("operator stop")
+            stop_mission()
+        elif cmd == "estop_release":
+            safety.rearm(data.get("epoch"))
+        elif cmd == "drive":
+            safety.drive(data.get("vx"), data.get("omega"), data.get("epoch"), data.get("sequence"))
+        elif cmd == "set_mode":
+            if data.get("mode") != "MANUAL":
+                return jsonify(error="Autonomous modes are disabled pending validation"), 409
+            safety.trip("mode change: rearm required")
+            stop_mission()
+        elif cmd == "reset_odom":
+            with _odom_lock:
+                odometry.update(x=0.0, y=0.0, theta=0.0)
+        else:
+            return jsonify(error="Unknown command"), 400
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 409 if cmd == "estop_release" else 400
+    return jsonify(status="ok", **safety.snapshot())
 
-    cmd = data.get("cmd", "")
-
-    with _mode_lock:
-        if estop_active and cmd != "estop_release":
-            return jsonify({"status": "ESTOP activo"}), 403
-
-    if cmd == "drive":
-        vx    = float(data.get("vx", 0.0))
-        omega = float(data.get("omega", 0.0))
-        # Solo enviar si estamos en modo MANUAL
-        with _mode_lock:
-            if rover_mode == "MANUAL":
-                send_to_pico({"cmd": "drive", "vx": vx, "omega": omega})
-        return jsonify({"status": "ok"})
-
-    elif cmd == "stop":
-        send_to_pico({"cmd": "stop"})
-        return jsonify({"status": "ok"})
-
-    elif cmd == "estop":
-        with _mode_lock:
-            estop_active = True
-        send_to_pico({"cmd": "stop"})
-        print("🛑 E-STOP ACTIVADO")
-        return jsonify({"status": "estop"})
-
-    elif cmd == "estop_release":
-        with _mode_lock:
-            estop_active = False
-        print("✅ E-STOP liberado")
-        return jsonify({"status": "ok"})
-
-    elif cmd == "set_mode":
-        new_mode = data.get("mode", "MANUAL").upper()
-        if new_mode in ("MANUAL", "AUTO", "AI"):
-            with _mode_lock:
-                rover_mode = new_mode
-            if new_mode != "MANUAL":
-                send_to_pico({"cmd": "stop"})
-            print(f"🔄 Modo cambiado a {new_mode}")
-            return jsonify({"status": "ok", "mode": new_mode})
-        return jsonify({"error": "modo inválido"}), 400
-
-    elif cmd == "reset_odom":
-        with _odom_lock:
-            odometry["x"] = 0.0
-            odometry["y"] = 0.0
-            odometry["theta"] = 0.0
-        return jsonify({"status": "odometría reseteada"})
-
-    return jsonify({"error": f"comando desconocido: {cmd}"}), 400
-
-# ── Misión autónoma (modo AI) ─────────────────────────────────────────────────
 
 @app.route('/mission', methods=['POST'])
 def mission_start():
-    """
-    Recibe la cola de objetivos desde la laptop y arranca el executor.
-    Body: {"objectives": [...]}
-    Solo funciona si el rover está en modo AI.
-    """
-    with _mode_lock:
-        if rover_mode != "AI":
-            return jsonify({"error": "El rover no está en modo AI"}), 400
-        if estop_active:
-            return jsonify({"error": "E-STOP activo"}), 403
-
-    try:
-        data = request.get_json(force=True)
-        objectives = data.get("objectives", [])
-        if not objectives:
-            return jsonify({"error": "Cola de objetivos vacía"}), 400
-    except Exception:
-        return jsonify({"error": "JSON inválido"}), 400
-
-    start_mission(objectives)
-    print(f"🚀 Misión iniciada con {len(objectives)} objetivos")
-    return jsonify({"status": "ok", "objectives_count": len(objectives)})
+    return jsonify(error="Experimental missions disabled pending safety validation"), 409
 
 
 @app.route('/mission/stop', methods=['POST'])
@@ -1100,7 +945,11 @@ def status():
         "gpio_available":    GPIO_AVAILABLE,
         "cv2_available":     CV2_AVAILABLE,
         "rover_mode":        m,
-        "estop":             es,
+        "estop":             safety.snapshot()["estop"],
+        "control":           safety.snapshot(),
+        "simulation":        SIMULATION,
+        "autonomy_enabled":  False,
+        "zmq_enabled":       False,
         "arm_cam_device":    f"/dev/video{CAMERA_ARM_USB_INDEX}",
         "arm_cam_present":   arm_cam_present,
     })
@@ -1110,85 +959,25 @@ def status():
 # =============================================================================
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("  ROVSSA Jetson Server — Modo Hardware")
-    print("=" * 60)
+    if SIMULATION:
+        threads = []
+        print("SIMULATION: no hardware threads or actuators initialized")
+    else:
+        threads = [
+            threading.Thread(target=serial_reader_thread, daemon=True),
 
-    # Inicializar BNO085 en el hilo principal antes de arrancar todo
-    _bno_instance = None
-    try:
-        import board, busio
-        from adafruit_bno08x.i2c import BNO08X_I2C
-        from adafruit_bno08x import BNO_REPORT_ROTATION_VECTOR as _BNO_RV
-        _i2c = busio.I2C(board.SCL, board.SDA)
-        _bno_instance = BNO08X_I2C(_i2c, address=BNO085_ADDR)
-        _bno_instance.enable_feature(_BNO_RV)
-        print("✅ BNO085 pre-inicializado")
-    except Exception as e:
-        print(f"⚠️  BNO085 no disponible: {e}")
-
-    # Crear interfaz de hardware para el executor autónomo
-    _hw_interface = HardwareInterface(
-        send_to_pico_fn   = send_to_pico,
-        telem_lock        = _telem_lock,
-        telemetry_dict    = current_telemetry,
-        imu_lock          = _imu_lock,
-        imu_refs          = current_telemetry,
-        gps_lock          = _gps_lock,
-        gps_dict          = gps_state,
-        yolo_lock         = _yolo_lock,
-        yolo_detections   = yolo_detections,
-    )
-
-    # Inicializar brazo SO101
-    _so101_robot = None
-    if LEROBOT_AVAILABLE:
-        try:
-            _so101_cfg = SOFollowerRobotConfig(port=SO101_PORT, id="my_awesome_follower_arm")
-            _so101_robot = SOFollower(_so101_cfg)
-            _so101_robot.connect()
-            print(f"✅ Brazo SO101 conectado en {SO101_PORT}")
-        except Exception as e:
-            print(f"⚠️  Brazo SO101 no disponible: {e}")
-            _so101_robot = None
-
-    threads = [
-        threading.Thread(target=serial_reader_thread,     daemon=True, name="SerialRx"),
-        threading.Thread(target=serial_writer_thread,     daemon=True, name="SerialTx"),
-        threading.Thread(target=lambda: imu_thread(_bno_instance), daemon=True, name="IMU"),
-        threading.Thread(target=ultrasonic_thread,        daemon=True, name="Ultrasonic"),
-        threading.Thread(target=video_capture_thread,     daemon=True, name="Video-CSI"),
-        threading.Thread(target=video_capture_usb_thread, daemon=True, name="Video-USB"),
-        threading.Thread(target=autonomous_brain_thread,  daemon=True, name="Brain"),
-        threading.Thread(target=lambda: executor_loop(_hw_interface), daemon=True, name="Executor"),
-        threading.Thread(
-            target=lambda: gps_reader_thread(
-                gps_lock=_gps_lock,
-                gps_dict=gps_state,
-            ),
-            daemon=True, name="GPS"
-        ),
-        threading.Thread(
-            target=lambda: yolo_detector_thread(
-                frame_lock=_frame_lock,
-                get_current_frame=lambda: current_frame,
-                yolo_lock=_yolo_lock,
-                yolo_detections_dict=yolo_detections,
-            ),
-            daemon=True, name="YOLO"
-        ),
-        threading.Thread(target=lambda: zmq_arm_thread(_so101_robot), daemon=True, name="ZMQ-Arm"),
-    ]
-
-    for t in threads:
-        t.start()
-        time.sleep(0.1)
-
-    print("🚀 Servidor ROVSSA en línea — http://0.0.0.0:8000")
-    print("   Conectar frontend a http://<IP_JETSON>:8000")
-    print("   Ver estado: http://<IP_JETSON>:8000/status")
-    print(f"   Cámara CSI:  http://<IP_JETSON>:8000/camera_csi")
-    print(f"   Cámara brazo USB: http://<IP_JETSON>:8000/camera_usb  (/dev/video{CAMERA_ARM_USB_INDEX})")
-    print("=" * 60)
-
-    app.run(host='0.0.0.0', port=8000, threaded=True, use_reloader=False)
+            threading.Thread(target=lambda: imu_thread(_bno_instance), daemon=True),
+            threading.Thread(target=ultrasonic_thread, daemon=True),
+            threading.Thread(target=video_capture_thread, daemon=True),
+            threading.Thread(target=video_capture_usb_thread, daemon=True),
+            threading.Thread(target=lambda: gps_reader_thread(_gps_lock, gps_state), daemon=True),
+        ]
+    if hasattr(signal, "SIGUSR1"):
+        enable_local_capture()
+    if NETWORK_DRIVE_ENABLED and not SIMULATION:
+        threads.append(threading.Thread(target=serial_writer_thread, daemon=True))
+        threads.append(threading.Thread(target=watchdog_thread, daemon=True))
+    for thread in threads:
+        thread.start()
+    print("ROVSSA backend: loopback only, access through authenticated HTTPS proxy")
+    app.run(host='127.0.0.1', port=8000, threaded=True, use_reloader=False, debug=False)

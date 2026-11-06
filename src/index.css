@@ -1,38 +1,84 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
-/* Reset para que el Dashboard ocupe toda la pantalla */
-:root {
-  font-family: ui-monospace, Consolas, monospace; /* Fuente tipo código por defecto */
-  background-color: #020617; /* Slate-950 de Tailwind */
-  color-scheme: dark;
-}
+:root {font-family:Inter,"Segoe UI",sans-serif;color:#e5eeec;background:#101816;color-scheme:dark;font-synthesis:none}
+* {box-sizing:border-box}
+body {margin:0; min-width:320px}
+.station {max-width:1440px;margin:auto;padding:0 clamp(16px,4vw,60px) 50px}
+.mast,.section-head,.page-heading,.brand,.actions {display:flex;align-items:center;gap:12px}
+.mast,.page-heading,.section-head {justify-content:space-between}
+.mast {min-height:84px;border-bottom:1px solid #33443e;flex-wrap:wrap;padding:14px 0}
+.brand-mark {background:#bce662;color:#182610;font:bold italic 28px/42px Arial;text-align:center;width:42px;border-radius:11px}
+h1,h2,h3,p,dl,dd {margin:0}
+h1 {font-size:22px;font-weight:800;line-height:1.1;letter-spacing:1px}
+h2 {font-size:22px;font-weight:650;letter-spacing:-.035em}
+h3 {font-weight:600;font-size:16px}
+small,p,dt,.page-heading span,.field,.file {color:#a7b8af}
+p {line-height:1.55;margin:8px 0 16px;font-size:14px}
+button,select,input,.file {font:inherit;border:1px solid #485950;border-radius:7px;padding:8px 13px;background:#233029;color:#eef3ec;max-width:100%}
+button,select,.file,summary {cursor:pointer}
+button:hover:not(:disabled),.file:hover {border-color:#bce662}
+button:disabled,fieldset:disabled {opacity:.55;cursor:default}
+button:focus-visible,input:focus-visible,select:focus-visible,.file:focus-within,summary:focus-visible {outline:2px solid #bee870;outline-offset:3px}
+.primary {background:#c4e976;color:#203011;border-color:#c4e976;font-weight:650}
+.status,.tag {font-size:12px;white-space:nowrap;color:#bccac0}
+.status::before {content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#9eaaa2;margin-right:7px}
+.status.live::before {background:#bce662}
+.page-heading {margin:26px 0 12px}
+.page-heading span,.tag,dd,code {font-family:ui-monospace,Consolas,monospace}
+.page-heading span {font-size:12px;overflow-wrap:anywhere}
+.camera-grid,.sensor-grid,.lower {display:grid;gap:14px}
+.camera-grid,.lower {grid-template-columns:repeat(2,minmax(0,1fr))}
+.sensor-grid {grid-template-columns:repeat(3,minmax(0,1fr))}
+.panel {background:#19231e;border:1px solid #35443d;border-radius:12px;padding:18px;min-width:0}
+.camera {padding:0;overflow:hidden}
+.camera .section-head {padding:12px 16px}
+.feed {background:#0a100d;aspect-ratio:16/8;display:grid;place-items:center;color:#8fa299;font-size:14px}
+.feed img {height:100%;width:100%;object-fit:contain;min-height:0}
+.tag {border:1px solid #435349;border-radius:5px;padding:3px 7px}
+dl {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+dt {font-size:12px}
+dd {font-size:16px;color:#e3f0dd}
+.lower,.map,details {margin-top:16px}
+.map {isolation:isolate;height:290px;overflow:hidden;border-radius:10px}
+.actions {flex-wrap:wrap}
+.field {display:grid;gap:6px;margin:16px 0 12px;font-size:14px}
+.section-head {flex-wrap:wrap}
+fieldset {border:0;padding:0;min-width:0}
+.file {position:relative;overflow:hidden}
+.file input {position:absolute;inset:0;opacity:0;width:100%;cursor:pointer}
+.digest {display:grid;justify-items:start;gap:6px;padding:12px 0;font-size:13px}
+code,output {overflow-wrap:anywhere}
+output {display:block;color:#cde4b6;font-size:14px;margin:10px 0}
+output:empty {display:none}
+a {text-decoration:underline}
+.subhead {margin:16px 0 8px}
+.stop {color:#ffc0a5;border-color:#8a5c48}
+dialog {position:fixed;inset:0;margin:auto;padding:26px;background:#19231e;color:#eef3ec;border:1px solid #536458;border-radius:14px;width:min(430px,calc(100vw - 32px));max-height:90dvh;box-shadow:0 24px 64px #0008}
+dialog::backdrop {background:#050b08ba;backdrop-filter:blur(4px)}
+dialog .actions {justify-content:flex-end}
+@media(max-width:760px){.sensor-grid,.lower{grid-template-columns:1fr}.camera-grid{gap:8px}.station{padding-inline:12px}.camera .section-head{padding:10px}.mast{gap:8px}}
+@media(max-width:540px){.camera-grid{grid-template-columns:1fr}.mast .status{font-size:11px}.mast button{padding:6px 9px}.page-heading span{max-width:48%}}
 
-body {
-  margin: 0;
-  display: flex;
-  place-items: baseline;
-  min-width: 320px;
-  min-height: 100vh;
-  background-color: #020617;
-}
+.proof-photo {width:min(100%,320px);max-height:210px;object-fit:contain;border-radius:6px;background:#0a100d}
 
-#root {
-  width: 100%;      /* IMPORTANTE: Quitamos los 1126px para que sea full-width */
-  margin: 0;
-  padding: 0;
-  min-height: 100vh;
-}
+.sync-state {margin:10px 0;color:#c5d8bc;font-size:14px}
+.evidence details {padding-top:8px}
+.evidence code {display:block;margin-top:12px;font-size:12px}
 
-/* Scrollbar estilo hacker/minimalista */
-::-webkit-scrollbar {
-  width: 5px;
-}
-::-webkit-scrollbar-track {
-  background: #020617;
-}
-::-webkit-scrollbar-thumb {
-  background: #064e3b; /* Verde oscuro */
-  border-radius: 10px;
-}
+.station nav {display:flex;gap:8px;padding:16px 0;flex-wrap:wrap}
+.station nav button[aria-current="page"],.node[aria-pressed="true"] {border-color:#c4e976;color:#d4ed9c}
+.capture-bar,.verification,.signal-path {display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.capture-bar {justify-content:space-between}
+.capture-bar .sync-state {margin:2px 0}
+.verification,.snapshot,.signal-path,.sensor-nodes,.log-view {margin:18px 0}
+.verification>div {padding:12px;background:#111b16;border-radius:8px;flex:1;min-width:160px}
+.snapshot .camera-grid,.snapshot .sensor-grid,.snapshot dl {margin-top:12px}
+.sensor-nodes {display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;border-left:2px solid #48534a;padding-left:12px}
+.node {text-align:left;display:grid;gap:4px}
+.log-view {padding:14px;background:#0c1410;border-radius:8px}
+.log-view li {font:13px/1.6 ui-monospace,monospace;overflow-wrap:anywhere}
+.log-view time {color:#bedb9f}
+@media(max-width:600px){.signal-path{display:grid;gap:4px}.signal-path>span{transform:rotate(90deg);justify-self:center}}
+
+.node[data-state="Sin respuesta"], .node[data-state="Sin lectura vigente"] {border-color:#b76c53}
+.node[data-state="Lectura vigente"] small {color:#c4e976}

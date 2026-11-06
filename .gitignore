@@ -25,3 +25,15 @@ dist-ssr
 
 .env
 .env.local
+
+# Deployment secrets and local test output
+.security/
+*.pem
+*.key
+__pycache__/
+.pytest_cache/
+
+.rovssa-demo/
+
+.security-pc/
+release/

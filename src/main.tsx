@@ -5,6 +5,6 @@ import App from './App.tsx'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+     {window.isSecureContext ? <App /> : <main>Para conectar, abrí la dirección HTTPS de la Jetson.</main>}
   </StrictMode>,
 )

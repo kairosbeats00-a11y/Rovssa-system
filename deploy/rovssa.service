@@ -1,0 +1,20 @@
+[Unit]
+Description=ROVSSA rover station
+After=network.target
+
+[Service]
+User=rovssa
+Group=rovssa
+WorkingDirectory=/srv/rovssa/backend
+EnvironmentFile=/etc/rovssa/backend.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/srv/rovssa/venv/bin/python /srv/rovssa/backend/jetson_server.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+StateDirectory=rovssa
+StateDirectoryMode=0700
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

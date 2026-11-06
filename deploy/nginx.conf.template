@@ -1,0 +1,40 @@
+# Install inside nginx's http context (e.g. sites-enabled on Debian/Ubuntu).
+limit_req_zone $binary_remote_addr zone=rovssa:10m rate=30r/s;
+server {
+    listen 443 ssl;
+    server_name __HOST__;
+    ssl_certificate __CERT__;
+    ssl_certificate_key __KEY__;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_tickets off;
+    auth_basic "ROVSSA operator";
+    auth_basic_user_file /etc/rovssa/operators.htpasswd;
+    limit_req zone=rovssa burst=30 nodelay;
+    limit_req_status 429;
+    client_max_body_size 16k;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy no-referrer always;
+    root __WEBROOT__;
+
+    location /api/ {
+        limit_except GET POST { deny all; }
+        proxy_pass http://127.0.0.1:8000/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-ROVSSA-Proxy "__SECRET__";
+        proxy_set_header Authorization "";
+        proxy_set_header Origin $http_origin;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_request_buffering on;
+        proxy_read_timeout 60s;
+    }
+    location / {
+        limit_except GET { deny all; }
+        try_files $uri $uri/ /index.html;
+    }
+    location ~ /\. { deny all; }
+}
