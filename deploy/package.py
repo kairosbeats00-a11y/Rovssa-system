@@ -13,7 +13,7 @@ def package():
     files+=list((ROOT/'entorno de simulacion').glob('*.py'))
     files+=list((ROOT/'deploy').glob('*.py'))+list((ROOT/'deploy').glob('*.sh'))
     files += [ROOT/path for path in ['deploy/nginx.conf.template','deploy/rovssa.service',
-              'requirements-test.txt','README.md','PUESTA-EN-MARCHA.md','SECURITY.md',
+              'requirements-test.txt','README.md','PUESTA-EN-MARCHA.md','ARRANQUE-DESDE-OTRA-PC.md','SECURITY.md',
               'contracts/Observation.sol','Abrir ROVSSA.html']]
     with zipfile.ZipFile(destination/'ROVSSA-listo.zip','w',zipfile.ZIP_DEFLATED) as archive:
         for file in files:

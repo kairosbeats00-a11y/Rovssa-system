@@ -158,7 +158,7 @@ export default function Evidence({online,page}:{online:boolean;page:string}) {
     localStorage.setItem(key,collection);setChainState('Huella confirmada en la colección consultada')
     setMessage('Token confirmado en Avalanche Fuji.')
   }
-  if(page==='Diagnóstico')return null
+  if(page!=='Operación' && page!=='Registros')return null
   if(page==='Operación')return <section className="panel capture-bar"><div><h3>Registro de campo</h3><small aria-live="polite">{captureMsg}{saved && entries.some(e=>e.id===saved)?' · Copiado a esta PC':''}</small>
   <div className="sync-state">{syncError || (!online?'Esperando enlace con la Jetson':pending===null?'Consultando registros…':pending?pending+' pendientes de copiar':'Copias al día')}</div></div>
   <button className="primary" disabled={!online||saving} onClick={register}>{saving?'Guardando…':'Registrar evento'}</button></section>

@@ -82,3 +82,29 @@ dialog .actions {justify-content:flex-end}
 
 .node[data-state="Sin respuesta"], .node[data-state="Sin lectura vigente"] {border-color:#b76c53}
 .node[data-state="Lectura vigente"] small {color:#c4e976}
+
+.vr-panel {max-width:920px;margin:12px auto}
+.vr-panel h2 {margin-top:14px}
+.vr-open {min-height:52px;min-width:220px;font-size:18px}
+.vr-checkbox {display:flex;align-items:center;gap:10px;margin:18px 0 8px}
+.vr-checkbox input {width:20px;height:20px;accent-color:#c4e976}
+.vr-caption {margin-top:14px}
+.vr-adjustments {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 24px}
+.vr-adjustments input {width:100%;padding:0;accent-color:#c4e976}
+.vr-adjustments .field span {color:#c4e976;font-variant-numeric:tabular-nums}
+dialog.vr-dialog {inset:0;margin:0;border:0;padding:0;border-radius:0;background:#000;
+  width:100vw;height:100dvh;max-width:none;max-height:none;overflow:hidden;box-shadow:none}
+.vr-dialog::backdrop {background:#000;backdrop-filter:none}
+.vr-fullscreen-root {position:relative;width:100vw;height:100dvh;background:#000}
+.vr-stage {position:absolute;left:50%;top:50%;width:100vw;height:100dvh;transform:translate(-50%,-50%);background:#000}
+.vr-canvas {display:block;width:100%;height:100%}
+.vr-toolbar {position:absolute;top:max(8px,env(safe-area-inset-top));left:0;right:0;display:flex;
+  justify-content:center;gap:8px;padding:0 12px;z-index:2}
+.vr-toolbar button {min-height:44px;background:#18251ee6;font-size:13px}
+.vr-notice {position:absolute;bottom:10px;left:15%;right:15%;margin:0;padding:8px;
+  background:#18251eee;color:#f4e4ba;text-align:center;font-size:12px;z-index:2;border-radius:8px}
+.vr-divider {position:absolute;left:50%;top:20%;bottom:20%;border-left:1px solid #5558;pointer-events:none}
+@media(orientation:portrait){
+  .vr-stage {width:100dvh;height:100vw;transform:translate(-50%,-50%) rotate(90deg)}
+}
+@media(max-width:540px){.vr-open{width:100%}.vr-adjustments{grid-template-columns:1fr}}

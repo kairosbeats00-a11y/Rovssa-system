@@ -1,5 +1,7 @@
 # ROVSSA · Estación de control
 
+Para instalar el proyecto en otra PC y arrancar la demo de escritorio o celular, seguí [Arrancar ROVSSA desde otra PC](ARRANQUE-DESDE-OTRA-PC.md).
+
 ## Uso diario
 
 1. Encendé el router y la Jetson. Después de la instalación inicial, Linux inicia el servidor y nginx automáticamente.
@@ -22,6 +24,31 @@ python deploy/demo.py
 Abrí http://127.0.0.1:8765 en el navegador con tu wallet. **Registrar evento** genera un archivo marcado como simulación, sin foto ni lecturas inventadas. Sirve para ensayar descarga, emisión y verificación con el mismo código que la consola real. Solo escucha en la PC. Para detenerlo, Ctrl+C.
 
 ## Preparación inicial de la Jetson
+
+### Visor de celular
+
+El panel **VR (Experimental)** permite elegir la cámara frontal o del brazo y pulsar **Abrir visor**.
+Solicita pantalla completa y orientación horizontal. Si el navegador restringe estas funciones,
+ocupa la ventana y gira la presentación en vertical; puede ser necesario girar el teléfono y sus barras pueden seguir visibles.
+El visor muestra una sola cámara para ambos ojos con corrección radial Brown/Cardboard mediante WebGL.
+En **Ajustar a mi celular y casco** se configuran las medidas de pantalla/lentes y los coeficientes ópticos.
+Los valores iniciales requieren calibración con el casco real. El patrón animado permite ajustar sin cámaras conectadas.
+El contenido es monoscópico. La teleoperación por movimiento de cabeza queda pendiente.
+
+El celular debe estar en la misma LAN, poder alcanzar la IP del servidor y confiar en su CA HTTPS.
+En la Jetson usa la misma dirección HTTPS y cuenta de operador que la PC. Para probar desde una PC,
+la demo permite HTTPS autenticado explícitamente, manteniendo el modo local por defecto:
+
+~~~sh
+python deploy/demo.py --lan-ip IP_DE_LA_PC --cert RUTA_CADENA_PEM --key RUTA_CLAVE_PEM --password-file RUTA_PASSWORD_TXT
+~~~
+
+El archivo de contraseña contiene la clave del usuario `operador` (mínimo 12 caracteres).
+El puerto predeterminado es 8765 y se cambia con `ROVSSA_DEMO_PORT`.
+Generá el certificado con `deploy/prepare.py` para la IP de la PC e instalá solamente su CA pública
+en el celular. El firewall debe permitir ese puerto desde la red local. Conservá claves y contraseñas fuera del repositorio.
+
+### Instalación
 
 Se necesita una Jetson con systemd, nginx y Python 3.9.2+ que pueda usar las bibliotecas de su JetPack. Comprobá la versión antes de la competencia. Si la instalación usa un Python alternativo, indicá su ruta con ROVSSA_PYTHON al ejecutar el instalador. Usá una IP reservada por DHCP o un nombre local estable.
 

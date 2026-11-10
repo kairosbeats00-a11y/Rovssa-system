@@ -4,6 +4,7 @@ import Connection from './Connection';
 import Evidence from './Evidence';
 import { apiUrl } from './api';
 import RoverMap from './RoverMap';
+import VRPanel from './VRPanel';
 
 function getJetsonIP(): string { return window.location.host; }
 
@@ -125,9 +126,10 @@ function App() {
     <div className="actions"><span className={'status '+(isConnected?'live':'')}>{isConnected ? telemetry.simulation?'Simulación':'En línea':'Sin conexión'}</span>
     <button onClick={()=>setShowSettings(true)}>Conexión</button></div></header>
     {showSettings && <Connection close={()=>setShowSettings(false)}/>}
-    <nav aria-label="Paneles">{['Operación','Registros','Diagnóstico'].map(tab=><button key={tab} aria-current={page===tab?'page':undefined} onClick={()=>setPage(tab)}>{tab}</button>)}</nav>
+    <nav aria-label="Paneles">{['Operación','Registros','Diagnóstico','VR (Experimental)'].map(tab=><button key={tab} aria-current={page===tab?'page':undefined} onClick={()=>setPage(tab)}>{tab}</button>)}</nav>
     <Evidence online={isConnected} page={page}/>
     <Diagnostics visible={page==='Diagnóstico'} telemetry={isConnected}/>
+    {page==='VR (Experimental)' && <VRPanel simulation={!!telemetry.simulation}/>}
     {page==='Operación' && <><div className="page-heading"><h2>Transmisión</h2><span>{jetsonIP}</span></div>
     <div className="camera-grid">{(['csi','usb'] as const).map((id,i)=><section className="panel camera" key={id}>
       <div className="section-head"><h3>{i?'Cámara del brazo':'Cámara frontal'}</h3><span className="tag">{id.toUpperCase()}</span></div>
